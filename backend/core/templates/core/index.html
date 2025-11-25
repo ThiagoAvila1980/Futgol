@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FutGol</title>
+    <style>
+      :root { --amarelo:#FFC107; --preto:#000; --cinza:#9E9E9E; --branco:#fff; }
+      body { margin:0; font-family: system-ui, -apple-system, sans-serif; background: var(--branco); color: var(--preto); }
+      header { background: var(--preto); color: var(--branco); padding: 16px; }
+      main { padding: 24px; max-width: 900px; margin: 0 auto; }
+      h1 { margin:0 0 16px; }
+      .card { border: 1px solid var(--cinza); border-radius: 8px; padding:16px; margin-bottom:12px; }
+      a.btn { display:inline-block; background: var(--amarelo); color: var(--preto); padding: 8px 12px; text-decoration: none; border-radius: 6px; }
+      code { background: #f4f4f4; padding:2px 6px; border-radius:4px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>FutGol</h1>
+    </header>
+    <main>
+      <p>Bem-vindo ao FutGol — controle de partidas, grupos, atletas e campos.</p>
+
+      <div class="card">
+        <h2>Administração</h2>
+        <p>Acesse o painel do Django para gerenciar dados diretamente.</p>
+        <p><a class="btn" href="/admin/">Abrir Admin</a></p>
+      </div>
+
+      <div class="card">
+        <h2>API</h2>
+        <p>Endpoints disponíveis sob <code>/api/</code>:</p>
+        <ul>
+          <li><code>POST /api/register</code> — cadastrar usuário</li>
+          <li><code>POST /api/login</code> — autenticar e obter token</li>
+          <li><code>GET/POST /api/grupos</code></li>
+          <li><code>GET/POST /api/atletas</code></li>
+          <li><code>GET/POST /api/campos</code></li>
+          <li><code>GET/POST /api/horarios</code></li>
+          <li><code>GET/POST /api/partidas</code></li>
+        </ul>
+        <p><a class="btn" href="/api/">Ver API</a></p>
+      </div>
+
+      <div class="card">
+        <h2>Exemplos de Requisição</h2>
+        <table>
+          <tr>
+            <th scope="row">Request Method:</th>
+            <td>GET</td>
+          </tr>
+          <tr>
+            <th scope="row">Request URL:</th>
+            <td id="req-url"></td>
+          </tr>
+        </table>
+        <p>Exemplos:</p>
+        <pre>
+curl -X POST http://127.0.0.1:8000/api/register \ 
+  -H "Content-Type: application/json" \ 
+  -d '{"usuario":"joao","senha":"123456","email":"joao@exemplo.com"}'
+
+curl -X POST http://127.0.0.1:8000/api/login \ 
+  -H "Content-Type: application/json" \ 
+  -d '{"usuario":"joao","senha":"123456"}'
+        </pre>
+      </div>
+
+      <div class="card">
+        <h2>Testar Autenticação</h2>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <input id="usuario" placeholder="Usuário"/>
+          <input id="senha" placeholder="Senha" type="password"/>
+          <input id="email" placeholder="E-mail (para cadastro)"/>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:8px;">
+          <a href="#" class="btn" id="btn-register">Cadastrar</a>
+          <a href="#" class="btn" id="btn-login">Entrar</a>
+        </div>
+        <pre id="auth-result" style="margin-top:12px;">Resultado aparecerá aqui</pre>
+      </div>
+
+      <p style="color:var(--cinza)">Interface móvel Flutter conecta-se a esta API.</p>
+    </main>
+  </body>
+  <script>
+    document.getElementById('req-url').textContent = window.location.href;
+    const base = `${window.location.origin}/api/`;
+    async function post(path, body) {
+      const r = await fetch(base + path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const t = await r.text();
+      let j; try { j = JSON.parse(t); } catch(e) { j = {status:r.status, body:t}; }
+      return j;
+    }
+    document.getElementById('btn-register').addEventListener('click', async (e)=>{
+      e.preventDefault();
+      const usuario = document.getElementById('usuario').value.trim();
+      const senha = document.getElementById('senha').value.trim();
+      const email = document.getElementById('email').value.trim();
+      const res = await post('register', {usuario, senha, email});
+      document.getElementById('auth-result').textContent = JSON.stringify(res, null, 2);
+    });
+    document.getElementById('btn-login').addEventListener('click', async (e)=>{
+      e.preventDefault();
+      const usuario = document.getElementById('usuario').value.trim();
+      const senha = document.getElementById('senha').value.trim();
+      const res = await post('login', {usuario, senha});
+      document.getElementById('auth-result').textContent = JSON.stringify(res, null, 2);
+    });
+  </script>
+  </html>

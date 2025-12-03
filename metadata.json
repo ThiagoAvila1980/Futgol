@@ -1,0 +1,7 @@
+{
+  "name": "Futgol",
+  "description": "Gerenciador inteligente de partidas de futebol para grupos de amigos. Cadastre jogadores, campos e deixe a IA equilibrar os times.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

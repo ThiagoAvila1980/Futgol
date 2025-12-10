@@ -34,6 +34,18 @@ export interface Player {
   matchesPlayed: number;
   avatar?: string; // Base64 string of the uploaded image
   isMonthlySubscriber?: boolean; // New: Is this player a monthly payer?
+  monthlyStartMonth?: string; // YYYY-MM from when monthly starts
+  isGuest?: boolean; // New: Guest profile without linked user
+}
+
+export interface Comment {
+  id: string;
+  groupId: string;
+  matchId: string;
+  parentId?: string;
+  authorPlayerId: string;
+  content: string;
+  createdAt: string;
 }
 
 export interface Group {
@@ -46,6 +58,11 @@ export interface Group {
   createdAt: string;
   members: string[]; // List of User IDs who are members
   pendingRequests: string[]; // List of User IDs waiting for approval
+  logo?: string; // Base64 image string for group logo
+  paymentMode?: 'split' | 'fixed';
+  fixedAmount?: number;
+  monthlyFee?: number;
+  city?: string;
 }
 
 export interface Field {

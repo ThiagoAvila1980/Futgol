@@ -21,6 +21,7 @@ interface FieldScreenProps {
 export const FieldScreen: React.FC<FieldScreenProps> = ({ fields, onSave, onDelete, activeGroupId, currentUser, activeGroup }) => {
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   
   // Search State
   const [searchTerm, setSearchTerm] = useState('');
@@ -176,22 +177,26 @@ export const FieldScreen: React.FC<FieldScreenProps> = ({ fields, onSave, onDele
       groupId: activeGroupId
     };
 
-    if (editingId) {
-      // Update
-      const existing = fields.find(f => f.id === editingId);
-      if (existing) {
-        await onSave({ ...existing, ...baseField });
+    try {
+      setIsSaving(true);
+      if (editingId) {
+        const existing = fields.find(f => f.id === editingId);
+        if (existing) {
+          await onSave({ ...existing, ...baseField });
+        }
+      } else {
+        const newField: Field = {
+          ...baseField,
+          id: crypto.randomUUID()
+        };
+        await onSave(newField);
       }
-    } else {
-      // Create
-      const newField: Field = {
-        ...baseField,
-        id: crypto.randomUUID()
-      };
-      await onSave(newField);
+      closeModal();
+    } catch (err) {
+      alert('Falha ao cadastrar campo. Verifique os dados e tente novamente.');
+    } finally {
+      setIsSaving(false);
     }
-    
-    closeModal();
   };
 
   const openNewFieldModal = () => {
@@ -455,8 +460,8 @@ export const FieldScreen: React.FC<FieldScreenProps> = ({ fields, onSave, onDele
                    <button type="button" onClick={closeModal} className="bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2.5 px-4 rounded-lg transition-colors flex-1">
                     Cancelar
                   </button>
-                  <button type="submit" className={`font-medium py-2.5 px-4 rounded-lg transition-colors shadow-md text-white flex-1 ${editingId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-green-600 hover:bg-green-700'}`}>
-                    {editingId ? 'Salvar Alterações' : 'Cadastrar Campo'}
+                  <button type="submit" disabled={isSaving} className={`font-medium py-2.5 px-4 rounded-lg transition-colors shadow-md text-white flex-1 ${editingId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-green-600 hover:bg-green-700'} ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}>
+                    {isSaving ? 'Salvando...' : (editingId ? 'Salvar Alterações' : 'Cadastrar Campo')}
                   </button>
                 </div>
               </form>

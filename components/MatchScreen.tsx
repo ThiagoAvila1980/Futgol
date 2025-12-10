@@ -1,6 +1,7 @@
 
-import React, { useState } from 'react';
-import { Player, Field, Match, User, Group } from '../types';
+import React, { useState, useEffect } from 'react';
+import DateInput from './DateInput';
+import { Player, Field, Match, User, Group, Position, Comment } from '../types';
 import { balanceTeamsWithAI } from '../services/geminiService';
 import { storage } from '../services/storage';
 
@@ -13,14 +14,16 @@ interface MatchScreenProps {
   activeGroupId: string;
   currentUser: User;
   activeGroup: Group;
+  onRefresh?: () => Promise<void>;
 }
 
-export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, matches, onSave, onDelete, activeGroupId, currentUser, activeGroup }) => {
+export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, matches, onSave, onDelete, activeGroupId, currentUser, activeGroup, onRefresh }) => {
   const [view, setView] = useState<'list' | 'details'>('list');
   const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
   
   // Filter State for Details View
-  const [playerFilter, setPlayerFilter] = useState<'all' | 'confirmed' | 'paid' | 'monthly'>('all');
+  const [playerFilter, setPlayerFilter] = useState<'all' | 'confirmed' | 'paid' | 'unpaid' | 'monthly'>('all');
+  const [finishedPaymentsFilter, setFinishedPaymentsFilter] = useState<'all' | 'paid' | 'unpaid'>('all');
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -36,6 +39,9 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
   const [scoreB, setScoreB] = useState(0);
   const [mvpId, setMvpId] = useState('');
   const [isFinishing, setIsFinishing] = useState(false);
+  const [guestName, setGuestName] = useState('');
+  const [guestPosition, setGuestPosition] = useState<Position>(Position.MEIO);
+  const [hideGuests, setHideGuests] = useState(false);
 
   // AI Loading State
   const [isBalancing, setIsBalancing] = useState(false);
@@ -43,6 +49,20 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
 
   // Delete Modal State
   const [matchToDelete, setMatchToDelete] = useState<string | null>(null);
+  const [isGuestPickerOpen, setIsGuestPickerOpen] = useState(false);
+  const [guestSearch, setGuestSearch] = useState('');
+  const [guestCandidates, setGuestCandidates] = useState<Player[]>([]);
+  const [isLoadingGuests, setIsLoadingGuests] = useState(false);
+  const [monthlyTxMap, setMonthlyTxMap] = useState<Record<string, string>>({});
+  const [monthlyAggregateId, setMonthlyAggregateId] = useState<string | null>(null);
+  const [isMonthlyLoading, setIsMonthlyLoading] = useState(false);
+
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [isCommentsLoading, setIsCommentsLoading] = useState(false);
+  const [newCommentText, setNewCommentText] = useState('');
+  const [replyTextMap, setReplyTextMap] = useState<Record<string, string>>({});
+  const [replyOpenMap, setReplyOpenMap] = useState<Record<string, boolean>>({});
+  const [deleteCommentId, setDeleteCommentId] = useState<string | null>(null);
 
   // Permission Checks: Admin can be owner OR in admin list
   const isAdmin = activeGroup.adminId === currentUser.id || (activeGroup.admins?.includes(currentUser.id) || false);
@@ -50,9 +70,185 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
   // Find the player record associated with the current user in this group
   const currentPlayer = players.find(p => p.userId === currentUser.id);
 
+  const currentMonth = () => new Date().toISOString().split('T')[0].slice(0, 7);
+  const loadMonthlyStatus = async () => {
+    try {
+      setIsMonthlyLoading(true);
+      const txs = await storage.transactions.getAll(activeGroupId);
+      const m = currentMonth();
+      const map: Record<string, string> = {};
+      txs.forEach(t => {
+        if (t.category === 'MONTHLY_FEE' && (t.date || '').slice(0, 7) === m && t.relatedPlayerId) {
+          map[t.relatedPlayerId] = t.id;
+        }
+      });
+      setMonthlyTxMap(map);
+      const aggregate = txs.find(t => t.category === 'MONTHLY_FEE' && !t.relatedPlayerId && (t.date || '').slice(0, 7) === m && (t.description || '').toLowerCase().includes('mensalistas'));
+      setMonthlyAggregateId(aggregate ? aggregate.id : null);
+      await syncMonthlyAggregate(Object.keys(map).length);
+    } catch {
+      setMonthlyTxMap({});
+      setMonthlyAggregateId(null);
+    } finally {
+      setIsMonthlyLoading(false);
+    }
+  };
+
+  const firstDayOfCurrentMonth = () => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}-01`;
+  };
+
+  const syncMonthlyAggregate = async (paidCount: number) => {
+    const amt = (Number(activeGroup.fixedAmount || 0)) * paidCount;
+    const tx = {
+      id: monthlyAggregateId || crypto.randomUUID(),
+      groupId: activeGroupId,
+      description: 'Mensalistas',
+      amount: amt,
+      type: 'INCOME' as const,
+      category: 'MONTHLY_FEE' as const,
+      date: firstDayOfCurrentMonth(),
+    };
+    await storage.transactions.save(tx as any);
+    if (!monthlyAggregateId) setMonthlyAggregateId(tx.id);
+  };
+
+  useEffect(() => {
+    if (view === 'details' && selectedMatch) {
+      loadMonthlyStatus();
+      loadComments();
+    }
+  }, [view, selectedMatch, activeGroupId]);
+
+  const loadComments = async () => {
+    try {
+      if (!selectedMatch) return;
+      setIsCommentsLoading(true);
+      const data = await storage.comments.getAll(activeGroupId, selectedMatch.id);
+      data.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+      setComments(data);
+    } catch {
+      setComments([]);
+    } finally {
+      setIsCommentsLoading(false);
+    }
+  };
+
+  const submitNewComment = async () => {
+    if (!selectedMatch || !newCommentText.trim()) return;
+    const genId = () => {
+      const c: any = (window as any).crypto;
+      if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+      return 'id_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    };
+    const c: Comment = {
+      id: genId(),
+      groupId: activeGroupId,
+      matchId: selectedMatch.id,
+      parentId: undefined,
+      authorPlayerId: currentPlayer ? currentPlayer.id : currentUser.id,
+      content: newCommentText.trim(),
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      await storage.comments.save(c);
+      setNewCommentText('');
+      await loadComments();
+    } catch {
+      alert('Não foi possível enviar o comentário.');
+    }
+  };
+
+  const submitReply = async (parentId: string) => {
+    if (!selectedMatch) return;
+    const text = (replyTextMap[parentId] || '').trim();
+    if (!text) return;
+    const genId = () => {
+      const c: any = (window as any).crypto;
+      if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+      return 'id_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    };
+    const c: Comment = {
+      id: genId(),
+      groupId: activeGroupId,
+      matchId: selectedMatch.id,
+      parentId,
+      authorPlayerId: currentPlayer ? currentPlayer.id : currentUser.id,
+      content: text,
+      createdAt: new Date().toISOString(),
+    };
+    try {
+      await storage.comments.save(c);
+      setReplyTextMap(prev => ({ ...prev, [parentId]: '' }));
+      setReplyOpenMap(prev => ({ ...prev, [parentId]: false }));
+      await loadComments();
+    } catch {
+      alert('Não foi possível enviar a resposta.');
+    }
+  };
+
+  const requestDeleteComment = (id: string) => {
+    setDeleteCommentId(id);
+  };
+
+  const confirmDeleteComment = async () => {
+    if (!deleteCommentId) return;
+    await storage.comments.delete(deleteCommentId);
+    setDeleteCommentId(null);
+    await loadComments();
+  };
+
+  const cancelDeleteComment = () => {
+    setDeleteCommentId(null);
+  };
+
+  const isMonthlyPaid = (playerId: string) => !!monthlyTxMap[playerId];
+  const toggleMonthlyFee = async (player: Player) => {
+    if (!isAdmin || !player.isMonthlySubscriber) return;
+    const existingId = monthlyTxMap[player.id];
+    try {
+      if (existingId) {
+        await storage.transactions.delete(existingId);
+      } else {
+        const txId = crypto.randomUUID();
+        const amt = Number(activeGroup.fixedAmount || 0);
+        const tx = {
+          id: txId,
+          groupId: activeGroupId,
+          description: `Mensalidade - ${getDisplayName(player)}`,
+          amount: amt,
+          type: 'INCOME' as const,
+          category: 'MONTHLY_FEE' as const,
+          relatedPlayerId: player.id,
+          date: new Date().toISOString().split('T')[0],
+        };
+        await storage.transactions.save(tx);
+      }
+      // Update local map optimistically
+      const newMap = { ...monthlyTxMap };
+      if (existingId) {
+        delete newMap[player.id];
+      } else {
+        // Not knowing exact id yet; reload to get accurate state
+        // But we can add a placeholder to count
+        newMap[player.id] = 'new';
+      }
+      setMonthlyTxMap(newMap);
+      await syncMonthlyAggregate(Object.keys(newMap).length);
+      // Finally, reload to get actual ids
+      await loadMonthlyStatus();
+    } catch {
+      alert('Não foi possível atualizar a mensalidade.');
+    }
+  };
+
   const handleCreateOrUpdateMatch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdmin) return;
+    if (!date || !time || !fieldId) return;
 
     let matchToSave: Match;
 
@@ -83,12 +279,24 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
       };
     }
 
-    await onSave(matchToSave);
-    closeModal();
+    try {
+      await onSave(matchToSave);
+      closeModal();
+    } catch (err) {
+      alert('Falha ao agendar partida. Verifique os dados e tente novamente.');
+    }
   };
 
   const openNewMatchModal = () => {
-    resetForm();
+    const now = new Date();
+    const isoDate = now.toISOString().split('T')[0];
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const nextHour = new Date(now.getTime() + 60 * 60 * 1000);
+    const defaultTime = `${pad(nextHour.getHours())}:${pad(nextHour.getMinutes())}`;
+    setDate(isoDate);
+    setTime(defaultTime);
+    setFieldId(fields[0]?.id || '');
+    setEditingMatchId(null);
     setIsModalOpen(true);
   }
 
@@ -185,14 +393,10 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
 
     // --- FINANCIAL SYNC ---
     const confirmedCount = updatedMatch.confirmedPlayerIds.length;
-    
-    if (confirmedCount > 0 && field.hourlyRate > 0) {
-      const costPerPerson = field.hourlyRate / confirmedCount;
-      const totalAmount = newPaidList.length * costPerPerson;
-      
+    const costPerPersonSync = calculateCostPerPlayer(updatedMatch);
+    if (confirmedCount > 0 && costPerPersonSync > 0) {
+      const totalAmount = newPaidList.length * costPerPersonSync;
       const description = `Pagamentos Avulsos - ${match.date.split('-').reverse().join('/')} - ${field.name}`;
-      
-      // Upsert transaction in background
       await storage.transactions.upsertMatchTransaction(
         activeGroupId,
         matchId,
@@ -201,6 +405,22 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
         match.date
       );
     }
+  };
+
+  const addExistingGuest = async (playerId: string) => {
+    if (!isAdmin) return;
+    if (!selectedMatch) return;
+    if (selectedMatch.confirmedPlayerIds.includes(playerId)) {
+      setIsGuestPickerOpen(false);
+      return;
+    }
+    const updated: Match = {
+      ...selectedMatch,
+      confirmedPlayerIds: [...selectedMatch.confirmedPlayerIds, playerId]
+    };
+    await onSave(updated);
+    setSelectedMatch(updated);
+    setIsGuestPickerOpen(false);
   };
 
   const handleGenerateTeams = async (match: Match) => {
@@ -258,7 +478,13 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
 
   const calculateCostPerPlayer = (match: Match) => {
     const field = fields.find(f => f.id === match.fieldId);
-    if (!field || field.hourlyRate <= 0 || match.confirmedPlayerIds.length === 0) return 0;
+    if (!field || match.confirmedPlayerIds.length === 0) return 0;
+    const mode = activeGroup.paymentMode || 'fixed';
+    if (mode === 'fixed') {
+      const amt = Number(activeGroup.fixedAmount || 0);
+      return amt > 0 ? amt : 0;
+    }
+    if (field.hourlyRate <= 0) return 0;
     return field.hourlyRate / match.confirmedPlayerIds.length;
   };
 
@@ -276,7 +502,12 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
     let text = `⚽ *FUTGOL - Jogo Confirmado!*\n`;
     text += `📅 ${match.date.split('-').reverse().join('/')} às ${match.time}\n`;
     text += `📍 ${field?.name || 'Local a definir'}\n`;
-    if (cost > 0) text += `💰 R$ ${cost.toFixed(2)} por pessoa\n`;
+    if (cost > 0) {
+      const mode = activeGroup.paymentMode || 'split';
+      text += mode === 'fixed' 
+        ? `💰 Valor fixo: R$ ${cost.toFixed(2)} por pessoa\n`
+        : `💰 Estimado: R$ ${cost.toFixed(2)} por pessoa (divisão)\n`;
+    }
     text += `\n`;
 
     if (match.teamA.length > 0) {
@@ -308,6 +539,12 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
     const confirmedCount = selectedMatch.confirmedPlayerIds.length;
     const costPerPerson = calculateCostPerPlayer(selectedMatch);
     const totalCollected = calculateTotalCollected(selectedMatch);
+    const confirmedPlayersForFinished = players.filter(p => selectedMatch.confirmedPlayerIds.includes(p.id));
+    const filteredConfirmedPlayersForFinished = finishedPaymentsFilter === 'paid'
+      ? confirmedPlayersForFinished.filter(p => selectedMatch.paidPlayerIds?.includes(p.id))
+      : finishedPaymentsFilter === 'unpaid'
+        ? confirmedPlayersForFinished.filter(p => !(selectedMatch.paidPlayerIds || []).includes(p.id))
+        : confirmedPlayersForFinished;
 
     // SORT PLAYERS: Current User First, then Alphabetical
     const sortedPlayersForPresence = [...players].sort((a, b) => {
@@ -323,12 +560,21 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
     });
 
     // FILTER PLAYERS BASED ON SELECTION
-    const filteredPlayersList = sortedPlayersForPresence.filter(p => {
+    let filteredPlayersList = sortedPlayersForPresence.filter(p => {
       if (playerFilter === 'confirmed') return selectedMatch.confirmedPlayerIds.includes(p.id);
       if (playerFilter === 'paid') return selectedMatch.paidPlayerIds?.includes(p.id);
+      if (playerFilter === 'unpaid') {
+        const isConfirmed = selectedMatch.confirmedPlayerIds.includes(p.id);
+        const isPaid = selectedMatch.paidPlayerIds?.includes(p.id);
+        const isMonthly = p.isMonthlySubscriber;
+        return isConfirmed && !isPaid && !isMonthly;
+      }
       if (playerFilter === 'monthly') return p.isMonthlySubscriber;
       return true; // 'all'
     });
+    if (playerFilter === 'all') {
+      filteredPlayersList = filteredPlayersList.filter(p => !p.isGuest);
+    }
 
     return (
       <div className="space-y-6 relative h-full">
@@ -343,50 +589,169 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
               <h2 className="text-2xl font-bold text-gray-800">Partida: {selectedMatch.date.split('-').reverse().join('/')}</h2>
               <p className="text-green-700 font-medium text-lg">{selectedMatch.time} - {fieldName}</p>
               
-              {!selectedMatch.finished && field && field.hourlyRate > 0 && (
+              {!selectedMatch.finished && (
                 <div className="mt-2 flex flex-col sm:flex-row gap-2">
                    <div className="inline-flex items-center gap-2 bg-green-50 px-3 py-1 rounded-full border border-green-100">
-                    <span className="text-xs font-semibold text-green-800">Custo Total: R${field.hourlyRate}</span>
-                    <span className="text-gray-300">|</span>
+                    {activeGroup.paymentMode === 'split' && field?.hourlyRate ? (
+                      <>
+                        <span className="text-xs font-semibold text-green-800">Custo Total: R$ {field.hourlyRate}</span>
+                        <span className="text-gray-300">|</span>
+                      </>
+                    ) : null}
                     <span className="text-sm font-bold text-green-700">R$ {costPerPerson.toFixed(2)} / pessoa</span>
                   </div>
-                  {isAdmin && (
-                    <div className="inline-flex items-center gap-2 bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
-                      <span className="text-xs font-bold text-blue-800">Arrecadado: R$ {totalCollected.toFixed(2)}</span>
-                    </div>
-                  )}
                 </div>
               )}
 
               {selectedMatch.finished && (
                 <div className="mt-2">
                   <span className="bg-gray-800 text-white px-3 py-1 rounded-full text-sm font-bold uppercase tracking-wider">Partida Finalizada</span>
-                  <div className="mt-2 text-xl font-bold">
-                    Placar: Time A {selectedMatch.scoreA} x {selectedMatch.scoreB} Time B
-                  </div>
+                  
                   {selectedMatch.mvpId && (
                      <div className="mt-1 text-yellow-600 font-semibold flex items-center gap-1">
                        🏆 Craque: {getDisplayName(players.find(p => p.id === selectedMatch.mvpId) || players[0])}
                      </div>
                   )}
+                  {isAdmin && (
+                    <div className="mt-3 p-4 bg-blue-50 border border-blue-100 rounded-lg">
+                      <div className="mb-3 hidden md:flex flex-wrap gap-2">
+                        <div className="inline-flex items-center gap-2 bg-gray-50 px-3 py-1 rounded-full border border-gray-200">
+                          <span className="text-xs font-semibold text-gray-700">Confirmados:</span>
+                          <span className="text-sm font-bold text-gray-900">{confirmedCount}</span>
+                        </div>
+                        <div className="inline-flex items-center gap-2 bg-green-50 px-3 py-1 rounded-full border border-green-100">
+                          <span className="text-xs font-semibold text-green-800">R$ por pessoa:</span>
+                          <span className="text-sm font-bold text-green-700">{costPerPerson ? costPerPerson.toFixed(2) : '—'}</span>
+                        </div>
+                        
+                        
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm text-blue-800 font-bold">Receber Pagamentos Avulsos (após encerramento)</p>
+                        <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded">Financeiro</span>
+                      </div>
+                      <div className="mt-3 flex gap-2 overflow-x-auto pb-2 -mb-2">
+                        <button
+                          onClick={() => setFinishedPaymentsFilter('all')}
+                          className={`px-3 py-1.5 rounded-full text-xs font-bold transition-colors whitespace-nowrap
+                            ${finishedPaymentsFilter === 'all' ? 'bg-gray-800 text-white' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}
+                        >
+                          Todos ({confirmedPlayersForFinished.length})
+                        </button>
+                        <button
+                          onClick={() => setFinishedPaymentsFilter('paid')}
+                          className={`px-3 py-1.5 rounded-full text-xs font-bold transition-colors whitespace-nowrap
+                            ${finishedPaymentsFilter === 'paid' ? 'bg-green-600 text-white' : 'bg-white text-gray-600 border border-gray-200 hover:bg-green-50'}`}
+                        >
+                          Pagos ({(selectedMatch.paidPlayerIds || []).length})
+                        </button>
+                        <button
+                          onClick={() => setFinishedPaymentsFilter('unpaid')}
+                          className={`px-3 py-1.5 rounded-full text-xs font-bold transition-colors whitespace-nowrap
+                            ${finishedPaymentsFilter === 'unpaid' ? 'bg-red-600 text-white' : 'bg-white text-gray-600 border border-gray-200 hover:bg-red-50'}`}
+                        >
+                          A Pagar ({confirmedPlayersForFinished.filter(p => !(selectedMatch.paidPlayerIds || []).includes(p.id) && !p.isMonthlySubscriber).length})
+                        </button>
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                        {selectedMatch.confirmedPlayerIds.length === 0 ? (
+                          <div className="col-span-full text-sm text-blue-700">Nenhum confirmado nesta partida.</div>
+                        ) : (
+                          filteredConfirmedPlayersForFinished.map(player => {
+                              const isPaid = selectedMatch.paidPlayerIds?.includes(player.id);
+                              return (
+                                <div key={player.id} className="flex items-center justify-between p-2 bg-white rounded border">
+                                  <div className="flex items-center gap-2 truncate">
+                                    <span className="text-sm font-medium text-gray-800 truncate">{getDisplayName(player)}</span>
+                                  </div>
+                                  <button 
+                                    onClick={() => togglePayment(selectedMatch.id, player.id)}
+                                    className={`text-xs px-3 py-1 rounded-full border font-bold transition-colors
+                                      ${isPaid ? 'bg-green-600 text-white border-green-700' : 'bg-red-600 text-white border-red-700 hover:bg-red-700'}`}
+                                  >
+                                    {isPaid ? 'Pago' : 'Pagar'}
+                                  </button>
+                                </div>
+                              );
+                            })
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
+
+              
             </div>
-            
-            <div className="flex gap-2 self-end md:self-auto">
-               <button 
-                onClick={() => shareOnWhatsApp(selectedMatch)}
-                className="bg-green-100 text-green-700 px-4 py-2 rounded-lg font-bold hover:bg-green-200 transition-colors flex items-center gap-2"
-                title="Compartilhar no WhatsApp"
-              >
-                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946.003-6.556 5.338-11.891 11.893-11.891 3.181.001 6.167 1.24 8.413 3.488 2.245 2.248 3.481 5.236 3.48 8.414-.003 6.557-5.338 11.892-11.893 11.892-1.99-.001-3.951-.5-5.688-1.448l-6.305 1.654zm6.597-3.807c1.676.995 3.276 1.591 5.392 1.592 5.448 0 9.886-4.434 9.889-9.885.002-5.462-4.415-9.89-9.881-9.892-5.452 0-9.887 4.434-9.889 9.884-.001 2.225.651 3.891 1.746 5.634l-.999 3.648 3.742-.981zm11.387-5.464c-.074-.124-.272-.198-.57-.347-.297-.149-1.758-8.683-2.031-.967-.272-.297-.471-.446-.669-.446-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306.943.32 1.286.32.395 0 1.237-.52 1.411-1.015.174-.495.174-.916.124-1.015-.05-.099-.248-.174-.545-.322z"/></svg>
-                Compartilhar
-              </button>
-            </div>
+            <button
+              onClick={() => shareOnWhatsApp(selectedMatch)}
+              className="absolute top-4 right-4 p-2 rounded-full border border-gray-200 text-gray-500 hover:bg-gray-100 hover:text-gray-700"
+              title="Compartilhar"
+              aria-label="Compartilhar"
+            >
+              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="5" r="3" />
+                <circle cx="6" cy="12" r="3" />
+                <circle cx="18" cy="19" r="3" />
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+              </svg>
+            </button>
           </div>
         </div>
 
-        {/* --- ACTIONS FOR ACTIVE GAME --- */}
+        
+
+        {isAdmin && isGuestPickerOpen && (
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[80vh] flex flex-col">
+              <div className="p-4 border-b flex justify-between items-center">
+                <h3 className="text-lg font-bold text-gray-900">Selecionar Convidado</h3>
+                <button onClick={() => setIsGuestPickerOpen(false)} className="text-gray-400 hover:text-gray-600 font-bold px-2">✕</button>
+              </div>
+              <div className="p-4">
+                <input 
+                  type="text" 
+                  value={guestSearch}
+                  onChange={(e) => setGuestSearch(e.target.value)}
+                  placeholder="Buscar convidado..."
+                  className="w-full border p-2 rounded mb-3"
+                />
+                <div className="space-y-2 overflow-y-auto max-h-[50vh]">
+                  {guestCandidates
+                    .filter(p => (p.nickname || p.name).toLowerCase().includes(guestSearch.toLowerCase()))
+                    .map(p => (
+                      <div key={p.id} className="flex items-center justify-between border rounded p-2">
+                        <div className="flex items-center gap-2">
+                          {p.avatar ? (
+                            <img src={p.avatar} alt="" className="w-8 h-8 rounded-full" />
+                          ) : (
+                            <div className="w-8 h-8 rounded-full bg-gray-200"></div>
+                          )}
+                          <div>
+                            <div className="text-sm font-bold text-gray-900">{p.nickname || p.name}</div>
+                            <div className="text-xs text-gray-500">{p.position}</div>
+                          </div>
+                        </div>
+                        <button 
+                          type="button"
+                          onClick={() => addExistingGuest(p.id)}
+                          className="text-sm font-bold bg-purple-50 text-purple-700 hover:bg-purple-100 px-3 py-1 rounded"
+                        >
+                          Adicionar
+                        </button>
+                      </div>
+                  ))}
+                  {guestCandidates.filter(p => (p.nickname || p.name).toLowerCase().includes(guestSearch.toLowerCase())).length === 0 && (
+                    <div className="text-sm text-gray-500">Nenhum convidado encontrado.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- ACTIVE GAME: ACTIONS --- */}
         {!selectedMatch.finished && (
           <>
             {/* Filter Tabs */}
@@ -396,7 +761,7 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                 className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors whitespace-nowrap
                   ${playerFilter === 'all' ? 'bg-gray-800 text-white' : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'}`}
               >
-                Todos ({players.length})
+                Todos ({players.filter(p => !p.isGuest).length})
               </button>
               <button 
                 onClick={() => setPlayerFilter('confirmed')}
@@ -415,12 +780,20 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                 </button>
               )}
               <button 
+                onClick={() => setPlayerFilter('unpaid')}
+                className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors whitespace-nowrap
+                  ${playerFilter === 'unpaid' ? 'bg-red-600 text-white' : 'bg-white text-gray-600 border border-gray-200 hover:bg-red-50'}`}
+              >
+                A Pagar ({players.filter(p => selectedMatch.confirmedPlayerIds.includes(p.id) && !(selectedMatch.paidPlayerIds || []).includes(p.id) && !p.isMonthlySubscriber).length})
+              </button>
+              <button 
                 onClick={() => setPlayerFilter('monthly')}
                 className={`px-4 py-1.5 rounded-full text-xs font-bold transition-colors whitespace-nowrap
                   ${playerFilter === 'monthly' ? 'bg-purple-600 text-white' : 'bg-white text-gray-600 border border-gray-200 hover:bg-purple-50'}`}
               >
                 Mensalistas ({players.filter(p => p.isMonthlySubscriber).length})
               </button>
+              {/* Guests are always excluded from the list; add via modal */}
             </div>
 
             {/* Presence List */}
@@ -433,6 +806,30 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                   </span>
                 )}
               </h3>
+
+              {isAdmin && (
+                <div className="mb-4">
+                  <button 
+                    type="button"
+                    onClick={async () => {
+                      setIsLoadingGuests(true);
+                      try {
+                        const all = await storage.players.getAll(activeGroupId);
+                        const available = all.filter(p => p.isGuest && !selectedMatch.confirmedPlayerIds.includes(p.id));
+                        setGuestCandidates(available);
+                        setIsGuestPickerOpen(true);
+                      } catch (e) {
+                        alert('Não foi possível carregar convidados.');
+                      } finally {
+                        setIsLoadingGuests(false);
+                      }
+                    }}
+                    className="bg-purple-600 text-white rounded px-3 py-2 hover:bg-purple-700"
+                  >
+                    {isLoadingGuests ? 'Carregando...' : 'Adicionar Convidado'}
+                  </button>
+                </div>
+              )}
               
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2 max-h-80 overflow-y-auto pr-1">
                 {filteredPlayersList.length === 0 ? (
@@ -463,6 +860,10 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                         >
                           <span>{isConfirmed ? '✅' : '⬜'}</span>
                           <span className="truncate">{getDisplayName(player)}</span>
+                          
+                          {player.isGuest && (
+                            <span className="text-[10px] bg-yellow-100 px-1 py-0.5 rounded text-yellow-800 border border-yellow-200">Convidado</span>
+                          )}
                           {isMe && <span className="text-blue-600 font-bold text-xs">(Você)</span>}
                         </button>
 
@@ -470,16 +871,23 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                         {isConfirmed && isAdmin && (
                           <div className="ml-2 pl-2 border-l border-gray-300">
                             {player.isMonthlySubscriber ? (
-                              <span title="Mensalista (Isento)" className="cursor-help text-purple-600 font-bold bg-purple-100 w-6 h-6 rounded-full flex items-center justify-center text-xs">M</span>
+                              <button
+                                type="button"
+                                onClick={() => toggleMonthlyFee(player)}
+                                title={isMonthlyPaid(player.id) ? 'Mensalidade paga' : 'Mensalidade pendente'}
+                                className={`w-6 h-6 rounded-full border text-xs font-bold flex items-center justify-center bg-white
+                                  ${isMonthlyPaid(player.id) ? 'text-green-600 border-green-600' : 'text-red-600 border-red-600'}`}
+                              >
+                                M
+                              </button>
                             ) : (
                               <button 
                                 onClick={() => togglePayment(selectedMatch.id, player.id)}
-                                className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs transition-colors border
-                                  ${isPaid ? 'bg-green-600 text-white border-green-700' : 'bg-white text-gray-300 border-gray-200 hover:border-green-500 hover:text-green-500'}
+                                className={`px-3 py-1 rounded-full font-bold text-xs transition-colors border
+                                  ${isPaid ? 'bg-green-600 text-white border-green-700' : 'bg-red-600 text-white border-red-700 hover:bg-red-700'}
                                 `}
-                                title={isPaid ? "Pago" : "Marcar Pagamento"}
                               >
-                                $
+                                {isPaid ? 'Pago' : 'Pagar'}
                               </button>
                             )}
                           </div>
@@ -502,11 +910,9 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                   <div className="flex gap-2 w-full md:w-auto">
                     {/* Button: Generate Teams */}
                     <button 
-                      onClick={() => handleGenerateTeams(selectedMatch)}
-                      disabled={isBalancing || confirmedCount < 2}
-                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-bold text-white transition-all
-                        ${isBalancing || confirmedCount < 2 ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 shadow-lg shadow-indigo-200'}
-                      `}
+                      onClick={() => {}}
+                      disabled={true}
+                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg font-bold text-white transition-all bg-gray-400 cursor-not-allowed`}
                     >
                       {isBalancing ? (
                         <>
@@ -538,6 +944,98 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                 )}
               </div>
               
+              <div className="mt-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-gray-800">Conversas</h3>
+                  <button onClick={loadComments} className="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded">Atualizar</button>
+                </div>
+                <div className="mt-2 bg-white border border-gray-200 rounded-lg p-3">
+                  <div className="flex gap-2 mb-3">
+                    <input
+                      type="text"
+                      value={newCommentText}
+                      onChange={(e) => setNewCommentText(e.target.value)}
+                      placeholder="Escreva um comentário"
+                      className="flex-1 border p-2 rounded-lg text-sm"
+                    />
+                    <button type="button" onClick={(e) => { e.stopPropagation(); submitNewComment(); }} disabled={!newCommentText.trim()} className="px-3 py-2 bg-green-600 text-white rounded-lg text-sm font-bold disabled:opacity-50">Enviar</button>
+                  </div>
+                  {isCommentsLoading ? (
+                    <div className="text-sm text-gray-400">Carregando...</div>
+                  ) : (
+                    <div className="space-y-3">
+                      {comments.filter(c => !c.parentId).map(c => {
+                        const author = players.find(p => p.id === c.authorPlayerId);
+                        const replies = comments.filter(r => r.parentId === c.id);
+                        const isMine = c.authorPlayerId === (currentPlayer?.id || currentUser.id);
+                        return (
+                          <div key={c.id} className={`border rounded-lg p-3 ${isMine ? 'bg-green-50 border-green-100' : 'bg-white border-gray-200'}`}>
+                            <div className="flex items-center justify-between">
+                              <div className="text-sm font-bold text-gray-800">{author ? (author.nickname || author.name) : 'Jogador'}</div>
+                              <div className="flex items-center gap-3">
+                                <div className="text-xs text-gray-500">{new Date(c.createdAt).toLocaleString('pt-BR')}</div>
+                                {currentPlayer?.id === c.authorPlayerId && (
+                                  <button onClick={() => requestDeleteComment(c.id)} className="text-[11px] text-red-600 font-bold">Excluir</button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="mt-2 text-sm text-gray-700">{c.content}</div>
+                            <div className="mt-2">
+                              <button
+                                onClick={() => setReplyOpenMap(prev => ({ ...prev, [c.id]: !prev[c.id] }))}
+                                className="text-xs text-blue-600 font-bold"
+                              >Responder</button>
+                            </div>
+                            {replyOpenMap[c.id] && (
+                              <div className="mt-2 flex gap-2">
+                                <input
+                                  type="text"
+                                  value={replyTextMap[c.id] || ''}
+                                  onChange={(e) => setReplyTextMap(prev => ({ ...prev, [c.id]: e.target.value }))}
+                                  placeholder="Escreva uma resposta"
+                                  className="flex-1 border p-2 rounded-lg text-sm"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); submitReply(c.id); }}
+                                  disabled={!((replyTextMap[c.id] || '').trim())}
+                                  className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold disabled:opacity-50"
+                                >Enviar</button>
+                              </div>
+                            )}
+                            {replies.length > 0 && (
+                              <div className="mt-3 pl-3 border-l-2 border-gray-200 space-y-2">
+                                {replies.map(r => {
+                                  const rauthor = players.find(p => p.id === r.authorPlayerId);
+                                  const isMineReply = r.authorPlayerId === (currentPlayer?.id || currentUser.id);
+                                  return (
+                                    <div key={r.id} className={`border rounded-lg p-2 ${isMineReply ? 'bg-green-50 border-green-100' : 'bg-white border-gray-200'}`}>
+                                      <div className="flex items-center justify-between">
+                                        <div className="text-xs font-bold text-gray-800">{rauthor ? (rauthor.nickname || rauthor.name) : 'Jogador'}</div>
+                                        <div className="flex items-center gap-2">
+                                          <div className="text-[11px] text-gray-500">{new Date(r.createdAt).toLocaleString('pt-BR')}</div>
+                                          {currentPlayer?.id === r.authorPlayerId && (
+                                            <button onClick={() => requestDeleteComment(r.id)} className="text-[11px] text-red-600 font-bold">Excluir</button>
+                                          )}
+                                        </div>
+                                      </div>
+                                      <div className="mt-1 text-sm text-gray-700">{r.content}</div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {comments.filter(c => !c.parentId).length === 0 && (
+                        <div className="text-sm text-gray-400">Nenhum comentário ainda.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {aiReasoning && (
                 <div className="mt-4 p-4 bg-indigo-50 text-indigo-800 rounded-lg text-sm border border-indigo-100 flex gap-2">
                   <span>🤖</span>
@@ -554,7 +1052,10 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                   <ul className="divide-y">
                     {selectedMatch.teamA.map(p => (
                       <li key={p.id} className="py-2 flex justify-between items-center text-sm">
-                        <span className="text-gray-900 font-medium">{getDisplayName(p)} <span className="text-gray-500 text-xs">({p.position})</span></span>
+                        <span className="text-gray-900 font-medium">
+                          {getDisplayName(p)} <span className="text-gray-500 text-xs">({p.position})</span>
+                          {p.isGuest && <span className="ml-2 text-[10px] bg-yellow-100 px-1 py-0.5 rounded text-yellow-800 border border-yellow-200">Convidado</span>}
+                        </span>
                         <span className="text-yellow-500 text-xs">{'★'.repeat(p.rating)}</span>
                       </li>
                     ))}
@@ -566,7 +1067,10 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                   <ul className="divide-y">
                     {selectedMatch.teamB.map(p => (
                       <li key={p.id} className="py-2 flex justify-between items-center text-sm">
-                        <span className="text-gray-900 font-medium">{getDisplayName(p)} <span className="text-gray-500 text-xs">({p.position})</span></span>
+                        <span className="text-gray-900 font-medium">
+                          {getDisplayName(p)} <span className="text-gray-500 text-xs">({p.position})</span>
+                          {p.isGuest && <span className="ml-2 text-[10px] bg-yellow-100 px-1 py-0.5 rounded text-yellow-800 border border-yellow-200">Convidado</span>}
+                        </span>
                         <span className="text-yellow-500 text-xs">{'★'.repeat(p.rating)}</span>
                       </li>
                     ))}
@@ -643,6 +1147,19 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
             </div>
           </div>
         )}
+
+        {deleteCommentId && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-xl shadow-2xl p-6 w-full max-w-md">
+              <h3 className="text-xl font-bold text-gray-800 mb-4">Excluir comentário</h3>
+              <p className="text-sm text-gray-600 mb-6">Tem certeza que deseja excluir este comentário? Esta ação não pode ser desfeita.</p>
+              <div className="mt-2 flex gap-3">
+                <button onClick={cancelDeleteComment} className="flex-1 py-2 px-3 text-gray-700 bg-gray-100 rounded-lg font-medium">Cancelar</button>
+                <button onClick={confirmDeleteComment} className="flex-1 py-2 px-3 bg-red-600 text-white rounded-lg font-bold">Excluir</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -668,7 +1185,15 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-20">
-        {matches.map(match => {
+        {([...matches].sort((a, b) => {
+            const aFinished = !!a.finished;
+            const bFinished = !!b.finished;
+            if (aFinished !== bFinished) return aFinished ? 1 : -1;
+            const aDate = new Date(`${a.date}T${a.time || '00:00'}`);
+            const bDate = new Date(`${b.date}T${b.time || '00:00'}`);
+            if (!aFinished && !bFinished) return aDate.getTime() - bDate.getTime();
+            return bDate.getTime() - aDate.getTime();
+          })).map(match => {
             const field = fields.find(f => f.id === match.fieldId);
             const fieldName = field?.name || "Local desconhecido";
             const isFinished = match.finished;
@@ -784,7 +1309,7 @@ export const MatchScreen: React.FC<MatchScreenProps> = ({ players, fields, match
                <form onSubmit={handleCreateOrUpdateMatch} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Data</label>
-                  <input type="date" required value={date} onChange={e => setDate(e.target.value)} className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none" />
+                  <DateInput value={date} onChange={(v) => setDate(v)} className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none" required min={new Date().toISOString().split('T')[0]} />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Horário</label>

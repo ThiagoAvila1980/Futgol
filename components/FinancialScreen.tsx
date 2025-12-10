@@ -1,5 +1,6 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import DateInput from './DateInput';
 import { Transaction, Player, Group, TransactionType } from '../types';
 import { storage } from '../services/storage';
 
@@ -41,8 +42,10 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
   // Delete Confirmation State
   const [transactionToDelete, setTransactionToDelete] = useState<string | null>(null);
   
-  const subscribers = players.filter(p => p.isMonthlySubscriber);
-  const currentMonthPrefix = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const monthlyCandidates = players;
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
+  const selectedMonthPrefix = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}`;
 
   // Updated Category Translation Map
   const categoryLabels: Record<string, string> = {
@@ -106,6 +109,21 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
 
   const { income, expense, total } = calculateBalance();
 
+  const earliestDate = useMemo(() => {
+    if (transactions.length === 0) return '';
+    let min = transactions[0].date;
+    for (const t of transactions) {
+      if (t.date < min) min = t.date;
+    }
+    return min;
+  }, [transactions]);
+
+  useEffect(() => {
+    if (!earliestDate) return;
+    if (filterStartDate < earliestDate) setFilterStartDate(earliestDate);
+    if (filterEndDate < earliestDate) setFilterEndDate(earliestDate);
+  }, [earliestDate]);
+
   // Filter Logic
   const filteredTransactions = transactions.filter(t => {
     return t.date >= filterStartDate && t.date <= filterEndDate;
@@ -116,11 +134,11 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
   };
 
   // Helper to check if paid current month
-  const hasPaidCurrentMonth = (playerId: string) => {
+  const hasPaidSelectedMonth = (playerId: string) => {
     return transactions.some(t => 
       t.relatedPlayerId === playerId && 
       t.category === 'MONTHLY_FEE' && 
-      t.date.startsWith(currentMonthPrefix)
+      t.date.startsWith(selectedMonthPrefix)
     );
   };
 
@@ -163,11 +181,11 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
         id: generateId(),
         groupId: activeGroup.id,
         description: `Mensalidade - ${player.nickname || player.name}`,
-        amount: 100, // Valor fixo
+        amount: Number(activeGroup.monthlyFee || 0),
         type: 'INCOME',
         category: 'MONTHLY_FEE',
         relatedPlayerId: player.id,
-        date: new Date().toISOString().split('T')[0]
+        date: `${selectedMonthPrefix}-01`
       };
 
       await storage.transactions.save(newTx);
@@ -203,7 +221,7 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
     setOtherDescription('');
   };
 
-  const currentMonthName = new Date().toLocaleString('pt-BR', { month: 'long' });
+  const currentMonthName = new Date(selectedYear, selectedMonth - 1).toLocaleString('pt-BR', { month: 'long' });
   
   // Available categories based on selected type
   const availableCategories = type === 'EXPENSE' ? expenseCategories : incomeCategories;
@@ -267,21 +285,23 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
           <div className="flex items-center gap-2 bg-white p-1 rounded-lg border border-gray-200 shadow-sm">
              <div className="flex items-center gap-1 px-2">
                <span className="text-xs font-bold text-gray-500 uppercase">De</span>
-               <input 
-                 type="date" 
+               <DateInput 
                  value={filterStartDate}
-                 onChange={(e) => setFilterStartDate(e.target.value)}
+                 onChange={(v) => setFilterStartDate(v)}
                  className="text-sm text-gray-900 bg-white font-medium focus:outline-none cursor-pointer"
+                 max={new Date().toISOString().split('T')[0]}
+                 min={earliestDate || undefined}
                />
              </div>
              <div className="w-px h-4 bg-gray-300"></div>
              <div className="flex items-center gap-1 px-2">
                <span className="text-xs font-bold text-gray-500 uppercase">Até</span>
-               <input 
-                 type="date" 
+               <DateInput 
                  value={filterEndDate}
-                 onChange={(e) => setFilterEndDate(e.target.value)}
+                 onChange={(v) => setFilterEndDate(v)}
                  className="text-sm text-gray-900 bg-white font-medium focus:outline-none cursor-pointer"
+                 max={new Date().toISOString().split('T')[0]}
+                 min={earliestDate || undefined}
                />
              </div>
           </div>
@@ -372,7 +392,7 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
                
                <div>
                  <label className="block text-sm font-medium text-gray-700 mb-1">Data</label>
-                 <input type="date" required value={transactionDate} onChange={e => setTransactionDate(e.target.value)} className="w-full border p-2 rounded-lg text-gray-900 bg-white focus:ring-2 focus:ring-green-500 outline-none" />
+                 <DateInput value={transactionDate} onChange={(v) => setTransactionDate(v)} className="w-full border p-2 rounded-lg text-gray-900 bg-white focus:ring-2 focus:ring-green-500 outline-none" required />
                </div>
                
                <div className="flex gap-3 pt-4">
@@ -389,35 +409,69 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[80vh] flex flex-col animate-fade-in-up">
             <div className="p-4 border-b flex justify-between items-center bg-indigo-50 rounded-t-xl">
-              <div>
-                <h3 className="text-lg font-bold text-indigo-900">Mensalidades de {currentMonthName}</h3>
-                <p className="text-xs text-indigo-700">Controle de quem já pagou este mês.</p>
+              <div className="flex items-center gap-3">
+                <div>
+                  <h3 className="text-lg font-bold text-indigo-900">Mensalidades de {currentMonthName}</h3>
+                  <p className="text-xs text-indigo-700">Selecione mês e ano para cobrar atrasados.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedMonth}
+                    onChange={(e) => setSelectedMonth(Number(e.target.value))}
+                    className="border border-indigo-200 rounded px-2 py-1 text-sm bg-white"
+                  >
+                    <option value={1}>janeiro</option>
+                    <option value={2}>fevereiro</option>
+                    <option value={3}>março</option>
+                    <option value={4}>abril</option>
+                    <option value={5}>maio</option>
+                    <option value={6}>junho</option>
+                    <option value={7}>julho</option>
+                    <option value={8}>agosto</option>
+                    <option value={9}>setembro</option>
+                    <option value={10}>outubro</option>
+                    <option value={11}>novembro</option>
+                    <option value={12}>dezembro</option>
+                  </select>
+                  <select
+                    value={selectedYear}
+                    onChange={(e) => setSelectedYear(Number(e.target.value))}
+                    className="border border-indigo-200 rounded px-2 py-1 text-sm bg-white"
+                  >
+                    {Array.from({ length: 6 }, (_, i) => new Date().getFullYear() - i).map(y => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
               <button onClick={() => setIsMonthlyModalOpen(false)} className="text-indigo-400 hover:text-indigo-600 font-bold px-2">✕</button>
             </div>
             <div className="p-4 overflow-y-auto bg-white">
-              {subscribers.length === 0 ? (
+              {monthlyCandidates.length === 0 ? (
                 <div className="py-8 text-center text-gray-400 border border-dashed border-gray-200 rounded-lg">
-                  <p>Nenhum mensalista cadastrado.</p>
-                  <p className="text-xs mt-1">Edite um jogador e ative a opção "Mensalista".</p>
+                  <p>Nenhum jogador disponível.</p>
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {subscribers.map(p => {
-                    const alreadyPaid = hasPaidCurrentMonth(p.id);
+                  {monthlyCandidates.map(p => {
+                    const alreadyPaid = hasPaidSelectedMonth(p.id);
+                    const eligible = !p.monthlyStartMonth || selectedMonthPrefix >= (p.monthlyStartMonth || '');
                     return (
                       <div key={p.id} className="flex flex-col sm:flex-row justify-between items-center bg-white p-3 rounded-lg border border-gray-200 shadow-sm hover:border-indigo-200 transition-colors">
                         <div className="flex items-center gap-3 w-full sm:w-auto mb-2 sm:mb-0">
                            <img src={p.avatar || `https://ui-avatars.com/api/?name=${p.name}`} className="w-10 h-10 rounded-full border border-gray-100 object-cover" alt="Avatar" />
                            <div>
                               <span className="font-bold text-gray-800 block">{p.nickname || p.name}</span>
-                              <span className="text-xs text-gray-500 block">Mensalista</span>
+                              {p.isMonthlySubscriber && <span className="text-xs text-gray-500 block">Mensalista</span>}
+                              {p.monthlyStartMonth && (
+                                <span className="text-[11px] text-gray-400">Início: {p.monthlyStartMonth.split('-').reverse().join('/')}</span>
+                              )}
                            </div>
                         </div>
                         
                         <button 
                           onClick={() => handlePayMonthlyFee(p)}
-                          disabled={processingId === p.id || successId === p.id || alreadyPaid}
+                          disabled={processingId === p.id || successId === p.id || alreadyPaid || !eligible}
                           className={`w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-bold transition-all flex items-center justify-center gap-2 min-w-[140px]
                             ${successId === p.id
                               ? 'bg-green-500 text-white border border-green-600'
@@ -425,7 +479,9 @@ export const FinancialScreen: React.FC<FinancialScreenProps> = ({ activeGroup, p
                                 ? 'bg-gray-100 text-green-700 border border-green-200 cursor-default'
                                 : processingId === p.id 
                                   ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
-                                  : 'bg-green-50 text-green-700 hover:bg-green-100 border border-green-200'}
+                                  : eligible 
+                                    ? 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200'
+                                    : 'bg-gray-50 text-gray-400 border border-gray-200 cursor-not-allowed'}
                           `}
                         >
                           {processingId === p.id && (

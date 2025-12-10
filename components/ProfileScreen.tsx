@@ -1,5 +1,6 @@
 
 import React, { useState, useRef } from 'react';
+import DateInput from './DateInput';
 import { User, Position } from '../types';
 
 interface ProfileScreenProps {
@@ -149,11 +150,11 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ user, onSave, onCa
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Data de Nascimento</label>
-                <input 
-                  type="date" 
+                <DateInput 
                   value={birthDate} 
-                  onChange={(e) => setBirthDate(e.target.value)} 
-                  className="w-full rounded-lg border-gray-300 border p-3 focus:ring-2 focus:ring-green-500 outline-none transition-shadow" 
+                  onChange={(v) => setBirthDate(v)} 
+                  className="w-full rounded-lg border-gray-300 border p-3 focus:ring-2 focus:ring-green-500 outline-none transition-shadow"
+                  max={new Date().toISOString().split('T')[0]}
                 />
               </div>
 

@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
+import DateInput from './DateInput';
 import { User, Group, Player, Position } from '../types';
 import { storage } from '../services/storage';
 
@@ -17,14 +18,60 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
 
   // Search State
   const [searchTerm, setSearchTerm] = useState('');
+  const [cityFilter, setCityFilter] = useState('');
 
   // Modals State
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editGroup, setEditGroup] = useState<Group | null>(null);
+  const [inviteToken, setInviteToken] = useState('');
   
   // Create Group Form
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupSport, setNewGroupSport] = useState('Futebol Society');
+  const [newGroupDate, setNewGroupDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [newGroupLogo, setNewGroupLogo] = useState<string>('');
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [newPaymentMode, setNewPaymentMode] = useState<'split' | 'fixed'>('fixed');
+  const [newFixedPerPerson, setNewFixedPerPerson] = useState<string>('0');
+  const [newMonthlyFee, setNewMonthlyFee] = useState<string>('0');
+  const [newGroupCity, setNewGroupCity] = useState<string>('');
+
+  const compressImage = (file: File, maxWidth = 512, maxHeight = 512, quality = 0.7): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width;
+        let h = img.height;
+        const ratio = Math.min(maxWidth / w, maxHeight / h, 1);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { reject(new Error('noctx')); return; }
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        try {
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          resolve(dataUrl);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      img.onerror = reject;
+      const reader = new FileReader();
+      reader.onload = () => {
+        img.src = reader.result as string;
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
 
   // Join Group Form
   const [inviteCode, setInviteCode] = useState('');
@@ -64,49 +111,54 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
 
   const handleCreateGroup = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    const newGroupId = crypto.randomUUID();
+    try {
+      const newGroupId = crypto.randomUUID();
 
-    const newGroup: Group = {
-      id: newGroupId,
-      adminId: user.id,
-      name: newGroupName,
-      sport: newGroupSport,
-      inviteCode: Math.random().toString(36).substring(2, 8).toUpperCase(),
-      createdAt: new Date().toISOString(),
-      members: [user.id],
-      pendingRequests: []
-    };
+      const newGroup: Group = {
+        id: newGroupId,
+        adminId: user.id,
+        name: newGroupName,
+        sport: newGroupSport,
+        inviteCode: Math.random().toString(36).substring(2, 8).toUpperCase(),
+        createdAt: new Date(newGroupDate).toISOString(),
+        members: [user.id],
+        pendingRequests: [],
+        logo: newGroupLogo || undefined,
+        paymentMode: newPaymentMode,
+        fixedAmount: newPaymentMode === 'fixed' ? Number(newFixedPerPerson || 0) : 0,
+        monthlyFee: Number(newMonthlyFee || 0),
+        city: newGroupCity.trim()
+      };
 
-    // 1. Save Group
-    await storage.groups.save(newGroup);
+      await storage.groups.save(newGroup);
 
-    // 2. AUTOMATICALLY Create Player Profile for the Admin
-    // This ensures the creator is also a player in the group roster
-    const adminPlayer: Player = {
-      id: crypto.randomUUID(),
-      groupId: newGroupId,
-      userId: user.id, // Link to User Account
-      name: user.name,
-      email: user.email,
-      avatar: user.avatar,
-      nickname: user.nickname || user.name.split(' ')[0],
-      phone: user.phone || '',
-      birthDate: user.birthDate || '',
-      favoriteTeam: user.favoriteTeam || '',
-      position: user.position || Position.MEIO,
-      rating: 5, // Admins start with 5 stars :)
-      matchesPlayed: 0
-    };
+      const adminPlayer: Player = {
+        id: crypto.randomUUID(),
+        groupId: newGroupId,
+        userId: user.id,
+        name: user.name,
+        email: user.email,
+        avatar: user.avatar,
+        nickname: user.nickname || user.name.split(' ')[0],
+        phone: user.phone || '',
+        birthDate: user.birthDate || '',
+        favoriteTeam: user.favoriteTeam || '',
+        position: user.position || Position.MEIO,
+        rating: 5,
+        matchesPlayed: 0
+      };
 
-    await storage.players.save(adminPlayer);
-    
-    setMyGroups([...myGroups, newGroup]);
-    setShowCreateModal(false);
-    setNewGroupName('');
-    
-    // Auto Select created group
-    onSelectGroup(newGroup);
+      await storage.players.save(adminPlayer);
+
+      setMyGroups([...myGroups, newGroup]);
+      setShowCreateModal(false);
+      setNewGroupName('');
+      setNewGroupDate(new Date().toISOString().split('T')[0]);
+      setNewGroupLogo('');
+      onSelectGroup(newGroup);
+    } catch (err: any) {
+      alert(err?.message || 'Não foi possível criar o grupo. Verifique sua conexão e tente novamente.');
+    }
   };
 
   const handleJoinGroup = async (e: React.FormEvent) => {
@@ -140,16 +192,41 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
     setShowJoinModal(true);
   };
 
+  const openEditGroup = (group: Group) => {
+    setEditGroup(group);
+    setNewGroupName(group.name);
+    setNewGroupSport(group.sport);
+    setNewGroupDate(group.createdAt.split('T')[0]);
+    setNewGroupLogo(group.logo || '');
+    setNewPaymentMode(group.paymentMode || 'fixed');
+    setNewFixedPerPerson(String(group.fixedAmount ?? 0));
+    setNewMonthlyFee(String((group as any).monthlyFee ?? 0));
+    setNewGroupCity(group.city || '');
+    setShowEditModal(true);
+  };
+
+  const handleCancelRequest = async (groupId: string) => {
+    try {
+      await storage.groups.cancelRequest(groupId, user.id);
+      await loadGroups();
+    } catch (err: any) {
+      alert(err?.message || 'Não foi possível cancelar a solicitação.');
+    }
+  };
+
   const copyUserId = () => {
     navigator.clipboard.writeText(user.id);
     alert("ID (Celular) copiado!");
   };
 
   // Filter Logic
-  const filteredOtherGroups = otherGroups.filter(g => 
-    g.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    g.sport.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const filteredOtherGroups = otherGroups.filter(g => {
+    const q = searchTerm.toLowerCase();
+    const c = cityFilter.toLowerCase();
+    const matchesQuery = !q || g.name.toLowerCase().includes(q) || g.sport.toLowerCase().includes(q);
+    const matchesCity = !c || (g.city || '').toLowerCase().includes(c);
+    return matchesQuery && matchesCity;
+  });
 
   return (
     <div className="space-y-12 animate-fade-in pb-10">
@@ -175,6 +252,22 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
               <path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" />
             </svg>
             Criar Grupo
+          </button>
+          <button 
+            onClick={async () => {
+              try {
+                if (!activeGroupId) { alert('Selecione um grupo para gerar convite.'); return; }
+                const res = await storage.groups.generateInvite(activeGroupId, 7 * 24 * 3600);
+                const link = `${window.location.origin}/join?token=${encodeURIComponent(res.token)}`;
+                try { await navigator.clipboard.writeText(link); } catch {}
+                alert(`Convite gerado. Link copiado: \n${link}`);
+              } catch (e: any) {
+                alert(e?.message || 'Falha ao gerar convite.');
+              }
+            }}
+            className="flex-1 md:flex-none px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 font-medium shadow-md transition-colors"
+          >
+            Gerar Convite
           </button>
         </div>
       </div>
@@ -224,8 +317,10 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
                     key={group.id} 
                     group={group} 
                     isActive={group.id === activeGroupId} 
-                    onClick={() => onSelectGroup(group)}
+                    onClick={() => onSelectGroup(group)} 
                     isOwner={group.adminId === user.id}
+                    isAdmin={group.adminId === user.id || (group.admins?.includes(user.id) ?? false)}
+                    onEdit={() => openEditGroup(group)}
                   />
                 ))
               )}
@@ -240,18 +335,32 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
                 Explorar Comunidade
               </h3>
               
-              {/* Search Bar */}
-              <div className="relative w-full md:w-64">
-                <input 
-                  type="text"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Buscar grupos..."
-                  className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                />
-                <svg className="w-4 h-4 text-gray-400 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
+              {/* Search Bars */}
+              <div className="flex flex-col md:flex-row gap-2 w-full md:w-auto">
+                <div className="relative w-full md:w-64">
+                  <input 
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="Buscar grupos..."
+                    className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <svg className="w-4 h-4 text-gray-400 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </div>
+                <div className="relative w-full md:w-64">
+                  <input 
+                    type="text"
+                    value={cityFilter}
+                    onChange={(e) => setCityFilter(e.target.value)}
+                    placeholder="Filtrar por cidade..."
+                    className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <svg className="w-4 h-4 text-gray-400 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 12.414m0 0a4 4 0 10-5.657 5.657 4 4 0 005.657-5.657z" />
+                  </svg>
+                </div>
               </div>
             </div>
 
@@ -265,12 +374,13 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
               ) : (
                 filteredOtherGroups.map(group => {
                    const isPending = group.pendingRequests?.includes(user.id);
-                   return (
-                      <GroupDiscoveryCard 
+                  return (
+                     <GroupDiscoveryCard 
                         key={group.id} 
                         group={group} 
                         isPending={isPending}
                         onJoin={() => startJoinWithCode(group.inviteCode)}
+                        onCancel={() => handleCancelRequest(group.id)}
                       />
                    );
                 })
@@ -305,15 +415,268 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
                   className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
                 >
                   <option>Futebol Society</option>
-                  <option>Futsal</option>
                   <option>Futebol de Campo</option>
-                  <option>Vôlei</option>
-                  <option>Basquete</option>
+                  <option>Futsal</option>
                 </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Data de Criação</label>
+                <DateInput 
+                  value={newGroupDate}
+                  onChange={(v) => setNewGroupDate(v)}
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none" 
+                  required
+                  max={new Date().toISOString().split('T')[0]}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Logo do Grupo (opcional)</label>
+                <div className="flex items-center gap-3">
+                  <div className="w-16 h-16 rounded-lg border border-gray-300 overflow-hidden bg-gray-100 flex items-center justify-center">
+                    {newGroupLogo ? (
+                      <img src={newGroupLogo} alt="Logo" className={`w-full h-full object-cover ${isUploadingLogo ? 'opacity-50' : ''}`} />
+                    ) : (
+                      <span className="text-gray-400 text-lg">🏷️</span>
+                    )}
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      className="px-3 py-2 bg-gray-100 rounded-lg text-sm font-medium hover:bg-gray-200"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploadingLogo}
+                    >
+                      {isUploadingLogo ? 'Enviando...' : 'Selecionar imagem'}
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        setIsUploadingLogo(true);
+                        compressImage(file)
+                          .then((dataUrl) => {
+                            setNewGroupLogo(dataUrl);
+                          })
+                          .catch(() => {
+                            alert('Falha ao processar a imagem. Tente outra imagem.');
+                          })
+                          .finally(() => setIsUploadingLogo(false));
+                      }}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">Formatos suportados: PNG, JPG. Tamanho máximo: 2MB.</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cidade</label>
+                <input 
+                  type="text" 
+                  value={newGroupCity}
+                  onChange={(e) => setNewGroupCity(e.target.value)}
+                  placeholder="Ex: São Paulo, SP"
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cobrança</label>
+                <div className="flex gap-2">
+                  <select 
+                    value={newPaymentMode}
+                    onChange={(e) => {
+                      const v = e.target.value as 'split' | 'fixed';
+                      setNewPaymentMode(v);
+                      if (v === 'split') setNewFixedPerPerson('0');
+                    }}
+                    className="flex-1 border p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
+                  >
+                    <option value="split">Dividir valor do campo</option>
+                    <option value="fixed">Valor fixo por pessoa</option>
+                  </select>
+                  {newPaymentMode === 'fixed' && (
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      placeholder="R$ por pessoa"
+                      value={newFixedPerPerson}
+                      onChange={(e) => setNewFixedPerPerson(e.target.value)}
+                      className="w-40 border p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
+                    />
+                  )}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Valor da mensalidade</label>
+                <input 
+                  type="number" 
+                  step="0.01"
+                  placeholder="R$ (mensal)"
+                  value={newMonthlyFee}
+                  onChange={(e) => setNewMonthlyFee(e.target.value)}
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
+                />
+                <p className="text-xs text-gray-500 mt-1">Usado para pagamentos de mensalistas.</p>
               </div>
               <div className="flex gap-3 mt-6">
                 <button type="button" onClick={() => setShowCreateModal(false)} className="flex-1 py-2 bg-gray-100 rounded-lg font-medium">Cancelar</button>
                 <button type="submit" className="flex-1 py-2 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700">Criar</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showEditModal && editGroup && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full animate-fade-in-up">
+            <h3 className="text-xl font-bold text-gray-900 mb-4">Editar Grupo</h3>
+            <form onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                const updated: Group = { 
+                  ...editGroup, 
+                  name: newGroupName, 
+                  sport: newGroupSport, 
+                  logo: newGroupLogo || undefined,
+                  createdAt: new Date(newGroupDate).toISOString(),
+                  paymentMode: newPaymentMode,
+                  fixedAmount: newPaymentMode === 'fixed' ? Number(newFixedPerPerson || 0) : 0,
+                  monthlyFee: Number(newMonthlyFee || 0),
+                  city: newGroupCity.trim()
+                };
+                await storage.groups.save(updated);
+                setShowEditModal(false);
+                setEditGroup(null);
+                await loadGroups();
+              } catch (err: any) {
+                alert(err?.message || 'Não foi possível salvar o grupo.');
+              }
+            }} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nome do Grupo</label>
+                <input 
+                  type="text" 
+                  required
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Data de Criação</label>
+                <DateInput 
+                  value={newGroupDate}
+                  onChange={(v) => setNewGroupDate(v)}
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" 
+                  required
+                  max={new Date().toISOString().split('T')[0]}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Modalidade</label>
+                <select 
+                  value={newGroupSport}
+                  onChange={(e) => setNewGroupSport(e.target.value)}
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                >
+                  <option>Futebol Society</option>
+                  <option>Futebol de Campo</option>
+                  <option>Futsal</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Logo do Grupo (opcional)</label>
+                <div className="flex items-center gap-3">
+                  <div className="w-16 h-16 rounded-lg border border-gray-300 overflow-hidden bg-gray-100 flex items-center justify-center">
+                    {newGroupLogo ? (<img src={newGroupLogo} alt="Logo" className="w-full h-full object-cover" />) : (<span className="text-gray-400 text-lg">🏷️</span>)}
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      className="px-3 py-2 bg-gray-100 rounded-lg text-sm font-medium hover:bg-gray-200"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploadingLogo}
+                    >
+                      {isUploadingLogo ? 'Enviando...' : 'Selecionar imagem'}
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        setIsUploadingLogo(true);
+                        compressImage(file)
+                          .then((dataUrl) => {
+                            setNewGroupLogo(dataUrl);
+                          })
+                          .catch(() => {
+                            alert('Falha ao processar a imagem. Tente outra imagem.');
+                          })
+                          .finally(() => setIsUploadingLogo(false));
+                      }}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500 mt-1">Formatos suportados: PNG, JPG. Tamanho máximo: 2MB.</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cobrança</label>
+                <div className="flex gap-2">
+                  <select 
+                    value={newPaymentMode}
+                    onChange={(e) => {
+                      const v = e.target.value as 'split' | 'fixed';
+                      setNewPaymentMode(v);
+                      if (v === 'split') setNewFixedPerPerson('0');
+                    }}
+                    className="flex-1 border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                  >
+                    <option value="split">Dividir valor do campo</option>
+                    <option value="fixed">Valor fixo por pessoa</option>
+                  </select>
+                  {newPaymentMode === 'fixed' && (
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      placeholder="R$ por pessoa"
+                      value={newFixedPerPerson}
+                      onChange={(e) => setNewFixedPerPerson(e.target.value)}
+                      className="w-40 border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                    />
+                  )}
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Valor da mensalidade</label>
+                <input 
+                  type="number" 
+                  step="0.01"
+                  placeholder="R$ (mensal)"
+                  value={newMonthlyFee}
+                  onChange={(e) => setNewMonthlyFee(e.target.value)}
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+                <p className="text-xs text-gray-500 mt-1">Usado para pagamentos de mensalistas.</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cidade</label>
+                <input 
+                  type="text" 
+                  value={newGroupCity}
+                  onChange={(e) => setNewGroupCity(e.target.value)}
+                  placeholder="Ex: São Paulo, SP"
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div className="flex justify-end gap-2 mt-4">
+                <button type="button" onClick={() => { setShowEditModal(false); setEditGroup(null); }} className="px-3 py-2 bg-gray-100 rounded-lg text-sm font-medium">Cancelar</button>
+                <button type="submit" className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold">Salvar</button>
               </div>
             </form>
           </div>
@@ -338,9 +701,41 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
                 />
                 <p className="text-xs text-gray-500 mt-2 text-center">Peça o código ao administrador do grupo.</p>
               </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Link ou Token de Convite</label>
+                <input 
+                  type="text" 
+                  value={inviteToken}
+                  onChange={(e) => setInviteToken(e.target.value)}
+                  className="w-full border p-2.5 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-center"
+                  placeholder="Cole aqui o link enviado"
+                />
+              </div>
               <div className="flex gap-3 mt-6">
                 <button type="button" onClick={() => setShowJoinModal(false)} className="flex-1 py-2 bg-gray-100 rounded-lg font-medium">Cancelar</button>
-                <button type="submit" className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700">Solicitar Entrada</button>
+                <button 
+                  type="submit" 
+                  className="flex-1 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
+                  onClick={async (e) => {
+                    e.preventDefault();
+                    try {
+                      if (inviteToken) {
+                        let token = inviteToken;
+                        try { const u = new URL(inviteToken); token = u.searchParams.get('token') || inviteToken; } catch {}
+                        await storage.groups.joinWithInvite(token, user.id);
+                        setShowJoinModal(false);
+                        setInviteToken('');
+                        alert('Solicitação enviada via link. Aguarde aprovação.');
+                        return;
+                      }
+                      await handleJoinGroup(e as any);
+                    } catch (err: any) {
+                      alert(err?.message || 'Falha ao solicitar entrada.');
+                    }
+                  }}
+                >
+                  Solicitar Entrada
+                </button>
               </div>
             </form>
           </div>
@@ -352,7 +747,7 @@ export const GroupsScreen: React.FC<GroupsScreenProps> = ({ user, onSelectGroup,
 };
 
 // Card for "My Groups"
-const GroupCard: React.FC<{ group: Group; isActive: boolean; onClick: () => void; isOwner: boolean }> = ({ group, isActive, onClick, isOwner }) => (
+const GroupCard: React.FC<{ group: Group; isActive?: boolean; onClick: () => void; isOwner?: boolean; isAdmin?: boolean; onEdit?: () => void }> = ({ group, isActive, onClick, isOwner, isAdmin, onEdit }) => (
   <div 
     onClick={onClick}
     className={`bg-white rounded-xl shadow-sm border overflow-hidden cursor-pointer transition-all hover:shadow-md hover:-translate-y-1 relative group-card
@@ -367,7 +762,11 @@ const GroupCard: React.FC<{ group: Group; isActive: boolean; onClick: () => void
     {/* Banner/Header */}
     <div className={`h-24 flex items-center justify-center text-5xl relative overflow-hidden
       ${isActive ? 'bg-gradient-to-br from-green-600 to-green-800' : 'bg-gradient-to-br from-gray-100 to-gray-200'}`}>
-      <span className="z-10 relative">⚽</span>
+      {group.logo ? (
+        <img src={group.logo} alt="Logo" className="absolute inset-0 w-full h-full object-cover opacity-90" />
+      ) : (
+        <span className="z-10 relative">⚽</span>
+      )}
       {/* Decorative circles */}
       <div className="absolute -bottom-4 -left-4 w-16 h-16 bg-white/10 rounded-full"></div>
       <div className="absolute top-2 right-8 w-8 h-8 bg-white/10 rounded-full"></div>
@@ -389,24 +788,32 @@ const GroupCard: React.FC<{ group: Group; isActive: boolean; onClick: () => void
         <span className="font-bold tracking-wider">{group.inviteCode}</span>
       </div>
       
-      <div className="mt-4 pt-3 border-t border-gray-100 text-center text-sm font-bold text-green-600 group-hover:underline">
-        Acessar Dashboard →
+      <div className="mt-4 pt-3 border-t border-gray-100 flex items-center justify-between text-sm">
+        <button onClick={onClick} className="text-green-600 font-bold hover:underline">Acessar Dashboard →</button>
+        {isAdmin && (
+          <button onClick={(e) => { e.stopPropagation(); onEdit && onEdit(); }} className="text-blue-600 font-bold bg-blue-50 hover:bg-blue-100 px-3 py-1 rounded">Editar Grupo</button>
+        )}
       </div>
     </div>
   </div>
 );
 
 // Card for "Discovery"
-const GroupDiscoveryCard: React.FC<{ group: Group; isPending?: boolean; onJoin: () => void }> = ({ group, isPending, onJoin }) => (
+const GroupDiscoveryCard: React.FC<{ group: Group; isPending?: boolean; onJoin: () => void; onCancel?: () => void }> = ({ group, isPending, onJoin, onCancel }) => (
   <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 flex flex-col justify-between hover:border-blue-300 transition-colors">
     <div>
       <div className="flex items-center gap-3 mb-3">
-        <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-lg">
-          {group.name.charAt(0)}
+        <div className="w-10 h-10 rounded-full bg-blue-100 overflow-hidden flex items-center justify-center text-blue-600 font-bold text-lg">
+          {group.logo ? (
+            <img src={group.logo} alt="Logo" className="w-full h-full object-cover" />
+          ) : (
+            <span>{group.name.charAt(0)}</span>
+          )}
         </div>
         <div>
            <h3 className="font-bold text-gray-900">{group.name}</h3>
            <p className="text-xs text-gray-500">{group.sport}</p>
+           {group.city && <p className="text-xs text-gray-500">🏙️ {group.city}</p>}
         </div>
       </div>
       
@@ -418,17 +825,31 @@ const GroupDiscoveryCard: React.FC<{ group: Group; isPending?: boolean; onJoin: 
     <div className="flex flex-col gap-2">
       <div className="text-[10px] text-center text-gray-400">Código (Demo): {group.inviteCode}</div>
       
-      <button 
-        onClick={onJoin}
-        disabled={isPending}
-        className={`w-full py-2 font-bold rounded-lg transition-colors flex items-center justify-center gap-2
-          ${isPending 
-            ? 'bg-yellow-100 text-yellow-700 cursor-not-allowed' 
-            : 'bg-blue-50 text-blue-600 hover:bg-blue-100'
-          }`}
-      >
-        {isPending ? 'Solicitação Enviada' : 'Solicitar Entrada'}
-      </button>
+      {isPending ? (
+        <div className="flex gap-2">
+          <button 
+            type="button"
+            disabled
+            className="flex-1 py-2 font-bold rounded-lg bg-yellow-100 text-yellow-700 cursor-default"
+          >
+            Solicitação Enviada
+          </button>
+          <button 
+            type="button"
+            onClick={onCancel}
+            className="flex-1 py-2 font-bold rounded-lg bg-red-50 text-red-600 hover:bg-red-100"
+          >
+            Cancelar
+          </button>
+        </div>
+      ) : (
+        <button 
+          onClick={onJoin}
+          className="w-full py-2 font-bold rounded-lg transition-colors flex items-center justify-center gap-2 bg-blue-50 text-blue-600 hover:bg-blue-100"
+        >
+          Solicitar Entrada
+        </button>
+      )}
     </div>
   </div>
 );

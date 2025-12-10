@@ -1,5 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
+import DateInput from './DateInput';
 import { Player, Position, Match, User, Group } from '../types';
 import { storage } from '../services/storage';
 
@@ -19,6 +20,7 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isRequestsModalOpen, setIsRequestsModalOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   
   // Pending Requests State
   const [pendingUsers, setPendingUsers] = useState<User[]>([]);
@@ -44,11 +46,22 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
   const [position, setPosition] = useState<Position>(Position.MEIO);
   const [rating, setRating] = useState(3);
   const [avatar, setAvatar] = useState<string>('');
-  const [isMonthlySubscriber, setIsMonthlySubscriber] = useState(false); // New
+  const [isMonthlySubscriber, setIsMonthlySubscriber] = useState(false);
+  const [monthlyStartMonth, setMonthlyStartMonth] = useState<string>('');
+  const [isGuestCheckbox, setIsGuestCheckbox] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [hideGuests, setHideGuests] = useState(false);
   
   // Admin Permission State
   const [isAdminCheckbox, setIsAdminCheckbox] = useState(false);
+
+  // Ensure guest cannot be monthly subscriber
+  useEffect(() => {
+    if (isGuestCheckbox && isMonthlySubscriber) {
+      setIsMonthlySubscriber(false);
+      setMonthlyStartMonth('');
+    }
+  }, [isGuestCheckbox, isMonthlySubscriber]);
 
   // Delete Modal State
   const [playerToDelete, setPlayerToDelete] = useState<string | null>(null);
@@ -109,6 +122,10 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
       const matchesNickname = player.nickname && player.nickname.toLowerCase().includes(term);
       return matchesName || matchesNickname;
     });
+
+    if (hideGuests) {
+      result = result.filter(p => !p.isGuest);
+    }
 
     result.sort((a, b) => {
       if (sortOption === 'name') {
@@ -194,54 +211,68 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (!phoneDigits || phoneDigits.length < 10) {
+      alert('Informe um celular válido (somente números).');
+      return;
+    }
 
+    const syntheticEmail = `guest+${crypto.randomUUID()}@example.com`;
     const basePlayer = {
       name,
       nickname: nickname.trim() || name.split(' ')[0],
-      birthDate,
-      email,
-      phone,
+      birthDate: isGuestCheckbox && !birthDate ? '1900-01-01' : birthDate,
+      email: isGuestCheckbox && !email ? syntheticEmail : email,
+      phone: phoneDigits,
+      userId: phoneDigits,
       favoriteTeam,
       position,
       rating,
       avatar,
-      isMonthlySubscriber,
+      isMonthlySubscriber: isGuestCheckbox ? false : isMonthlySubscriber,
+      monthlyStartMonth: isGuestCheckbox ? undefined : monthlyStartMonth,
+      isGuest: isGuestCheckbox,
       groupId: activeGroup.id
     };
 
     let targetUserId: string | undefined = undefined;
 
-    if (editingId) {
-      const existing = players.find(p => p.id === editingId);
-      if (existing) {
-        await onSave({ ...existing, ...basePlayer });
-        targetUserId = existing.userId;
-      }
-    } else {
-      const newPlayer: Player = {
-        ...basePlayer,
-        id: importedId || crypto.randomUUID(), 
-        matchesPlayed: 0
-      };
-      await onSave(newPlayer);
-      targetUserId = newPlayer.userId;
-    }
-
-    if (isOwner && targetUserId) {
-      const isCurrentlyAdmin = activeGroup.admins?.includes(targetUserId);
-      
-      if (isAdminCheckbox && !isCurrentlyAdmin) {
-        await storage.groups.promoteMember(activeGroup.id, targetUserId);
-      } else if (!isAdminCheckbox && isCurrentlyAdmin) {
-        if (targetUserId !== activeGroup.adminId) {
-          await storage.groups.demoteMember(activeGroup.id, targetUserId);
+    try {
+      setIsSaving(true);
+      if (editingId) {
+        const existing = players.find(p => p.id === editingId);
+        if (existing) {
+          await onSave({ ...existing, ...basePlayer });
+          targetUserId = existing.userId;
         }
+      } else {
+        const newPlayer: Player = {
+          ...basePlayer,
+          id: importedId || crypto.randomUUID(), 
+          matchesPlayed: 0
+        };
+        await onSave(newPlayer);
+        targetUserId = newPlayer.userId;
       }
-      
-      if (onRefresh) await onRefresh();
+
+      if (isOwner && targetUserId) {
+        const isCurrentlyAdmin = activeGroup.admins?.includes(targetUserId);
+        if (isAdminCheckbox && !isCurrentlyAdmin) {
+          await storage.groups.promoteMember(activeGroup.id, targetUserId);
+        } else if (!isAdminCheckbox && isCurrentlyAdmin) {
+          if (targetUserId !== activeGroup.adminId) {
+            await storage.groups.demoteMember(activeGroup.id, targetUserId);
+          }
+        }
+        if (onRefresh) await onRefresh();
+      }
+
+      closeModal();
+    } catch (err) {
+      alert('Falha ao cadastrar jogador. Verifique os dados e tente novamente.');
+    } finally {
+      setIsSaving(false);
     }
-    
-    closeModal();
   };
 
   const handleEdit = (player: Player) => {
@@ -256,6 +287,8 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
     setRating(player.rating);
     setAvatar(player.avatar || '');
     setIsMonthlySubscriber(player.isMonthlySubscriber || false);
+    setMonthlyStartMonth(player.monthlyStartMonth || '');
+    setIsGuestCheckbox(player.isGuest || false);
     setEditingId(player.id);
     setImportedId(null);
     setSearchId(player.id); 
@@ -290,6 +323,8 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
     setIsUploading(false);
     setIsAdminCheckbox(false);
     setIsMonthlySubscriber(false);
+    setMonthlyStartMonth('');
+    setIsGuestCheckbox(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -375,6 +410,14 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
              </div>
           </div>
 
+          <button 
+            onClick={() => setHideGuests(v => !v)}
+            className={`px-3 py-2.5 rounded-lg font-bold shadow-sm border transition-all whitespace-nowrap
+              ${hideGuests ? 'bg-yellow-100 text-yellow-800 border-yellow-200' : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'}`}
+          >
+            {hideGuests ? 'Convidados ocultos' : 'Ocultar Convidados'}
+          </button>
+
           {isAdmin && (
             <button 
               onClick={openNewPlayerModal}
@@ -433,6 +476,7 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
                         <h4 className="font-bold text-gray-900 truncate text-lg">{displayName}</h4>
                         {isPlayerOwner && <span title="Dono do Grupo" className="text-sm">👑</span>}
                         {isPlayerAdmin && !isPlayerOwner && <span title="Administrador" className="text-sm">🛡️</span>}
+                        {player.isGuest && <span className="text-xs bg-yellow-100 px-1.5 py-0.5 rounded text-yellow-800 border border-yellow-200">Convidado</span>}
                       </div>
                       <p className="text-sm text-gray-500 flex items-center gap-1">
                         {player.position}
@@ -579,7 +623,12 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Data de Nascimento</label>
-                  <input type="date" value={birthDate} onChange={(e) => setBirthDate(e.target.value)} className="w-full rounded-lg border-gray-300 border p-2.5 focus:ring-2 focus:ring-green-500 outline-none" />
+                  <DateInput 
+                    value={birthDate}
+                    onChange={(v) => setBirthDate(v)}
+                    className="w-full rounded-lg border-gray-300 border p-2.5 focus:ring-2 focus:ring-green-500 outline-none"
+                    max={new Date().toISOString().split('T')[0]}
+                  />
                 </div>
 
                 <div className="md:col-span-2">
@@ -613,14 +662,40 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
                 </div>
 
                 {/* Monthly Subscriber Toggle */}
-                <div className="md:col-span-2 bg-purple-50 p-3 rounded-lg border border-purple-100 flex items-center justify-between">
+                <div className={`md:col-span-2 p-3 rounded-lg border flex items-center justify-between ${isGuestCheckbox ? 'bg-purple-50 border-purple-100 opacity-50 cursor-not-allowed' : 'bg-purple-50 border-purple-100'}`}>
                   <div>
                     <label className="block text-sm font-bold text-purple-900">Mensalista</label>
                     <p className="text-xs text-purple-700">Paga valor fixo mensal e não paga por jogo.</p>
                   </div>
                   <label className="relative inline-flex items-center cursor-pointer">
-                    <input type="checkbox" checked={isMonthlySubscriber} onChange={e => setIsMonthlySubscriber(e.target.checked)} className="sr-only peer" />
+                    <input 
+                      type="checkbox" 
+                      checked={isMonthlySubscriber} 
+                      onChange={e => {
+                        const checked = e.target.checked;
+                        setIsMonthlySubscriber(checked);
+                        if (checked && !monthlyStartMonth) {
+                          const now = new Date();
+                          const prefix = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+                          setMonthlyStartMonth(prefix);
+                        }
+                      }} 
+                      className="sr-only peer" 
+                      disabled={isGuestCheckbox} 
+                    />
                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-purple-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                  </label>
+                </div>
+
+                {/* Guest Toggle */}
+                <div className="md:col-span-2 bg-yellow-50 p-3 rounded-lg border border-yellow-100 flex items-center justify-between">
+                  <div>
+                    <label className="block text-sm font-bold text-yellow-900">Convidado</label>
+                    <p className="text-xs text-yellow-700">Perfil sem cadastro no app. Não vincula permissões.</p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input type="checkbox" checked={isGuestCheckbox} onChange={e => setIsGuestCheckbox(e.target.checked)} className="sr-only peer" />
+                    <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-yellow-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-yellow-600"></div>
                   </label>
                 </div>
 
@@ -646,8 +721,8 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ players, matches, on
                 
                 <div className="md:col-span-2 flex gap-3 pt-4">
                   <button type="button" onClick={closeModal} className="flex-1 py-3 bg-gray-100 text-gray-700 rounded-lg font-medium hover:bg-gray-200">Cancelar</button>
-                  <button type="submit" className={`flex-1 py-3 text-white rounded-lg font-bold shadow-md ${editingId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-green-600 hover:bg-green-700'}`}>
-                    {editingId ? 'Salvar Alterações' : 'Cadastrar'}
+                  <button type="submit" disabled={isSaving} className={`flex-1 py-3 text-white rounded-lg font-bold shadow-md ${editingId ? 'bg-yellow-500 hover:bg-yellow-600' : 'bg-green-600 hover:bg-green-700'} ${isSaving ? 'opacity-70 cursor-not-allowed' : ''}`}>
+                    {isSaving ? 'Salvando...' : (editingId ? 'Salvar Alterações' : 'Cadastrar')}
                   </button>
                 </div>
               </form>

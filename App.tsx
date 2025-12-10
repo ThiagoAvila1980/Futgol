@@ -11,6 +11,9 @@ import { FinancialScreen } from './components/FinancialScreen';
 import { storage } from './services/storage';
 import { authService } from './services/auth';
 
+const VIEW_KEY = 'futgol_last_view';
+const ACTIVE_GROUP_KEY = 'futgol_active_group_id';
+
 const App: React.FC = () => {
   // Auth State
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -22,16 +25,27 @@ const App: React.FC = () => {
   // FIX: Separate refs for desktop and mobile to avoid conflict
   const desktopUserMenuRef = useRef<HTMLDivElement>(null);
   const mobileUserMenuRef = useRef<HTMLDivElement>(null);
+  const [showMainMenu, setShowMainMenu] = useState(false);
+  const mobileMainMenuRef = useRef<HTMLDivElement>(null);
 
   // App State & Multi-tenancy
   const [activeGroup, setActiveGroup] = useState<Group | null>(null);
-  const [currentView, setCurrentView] = useState<ViewState>('groups');
+  const [currentView, setCurrentView] = useState<ViewState>(() => {
+    try {
+      const v = localStorage.getItem(VIEW_KEY) as ViewState | null;
+      return (v as ViewState) || 'groups';
+    } catch {
+      return 'groups';
+    }
+  });
   const [isDataLoading, setIsDataLoading] = useState(false);
 
   // Data State (Filtered by activeGroup)
   const [players, setPlayers] = useState<Player[]>([]);
   const [fields, setFields] = useState<Field[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
+  const [notifications, setNotifications] = useState<string[]>([]);
+  const prevConfirmCountsRef = useRef<Record<string, number>>({});
 
   // Permission Checks
   const isAdmin = activeGroup && currentUser && (activeGroup.adminId === currentUser.id || activeGroup.admins?.includes(currentUser.id));
@@ -39,30 +53,30 @@ const App: React.FC = () => {
   // Close user menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      // Check Desktop Menu
       const clickedOutsideDesktop = desktopUserMenuRef.current && !desktopUserMenuRef.current.contains(event.target as Node);
-      
-      // Check Mobile Menu
       const clickedOutsideMobile = mobileUserMenuRef.current && !mobileUserMenuRef.current.contains(event.target as Node);
+      const clickedOutsideMain = mobileMainMenuRef.current && !mobileMainMenuRef.current.contains(event.target as Node);
 
-      // Only close if clicked outside BOTH (and menu is actually open)
       if (showUserMenu && clickedOutsideDesktop && clickedOutsideMobile) {
         setShowUserMenu(false);
+      }
+      if (showMainMenu && clickedOutsideMain) {
+        setShowMainMenu(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showUserMenu]);
+  }, [showUserMenu, showMainMenu]);
 
   // Check Session on Boot
   useEffect(() => {
     const checkSession = async () => {
       try {
-        // Seed database if empty
-        storage.seedDatabase();
-        
-        const user = await authService.getCurrentUser();
+        const user = await authService.validateSession();
         setCurrentUser(user);
+        if (user) {
+          await storage.seedDatabase();
+        }
       } catch (err) {
         console.error("Session check failed", err);
       } finally {
@@ -71,6 +85,18 @@ const App: React.FC = () => {
     };
     checkSession();
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_KEY, currentView);
+    } catch {}
+  }, [currentView]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ACTIVE_GROUP_KEY, activeGroup?.id || '');
+    } catch {}
+  }, [activeGroup]);
 
   // POLLING: Refresh Active Group data periodically to catch new join requests
   useEffect(() => {
@@ -102,12 +128,26 @@ const App: React.FC = () => {
   useEffect(() => {
     if (currentUser && !activeGroup) {
       const initGroups = async () => {
-        const userGroups = await storage.groups.getByUser(currentUser.id);
-        if (userGroups.length > 0) {
-          setActiveGroup(userGroups[0]);
-          setCurrentView('dashboard');
-        } else {
-          setCurrentView('groups'); // Force user to create group
+        try {
+          const userGroups = await storage.groups.getByUser(currentUser.id);
+          const savedId = (() => {
+            try { return localStorage.getItem(ACTIVE_GROUP_KEY) || ''; } catch { return ''; }
+          })();
+          const chosen = userGroups.find(g => g.id === savedId) || userGroups[0];
+          if (chosen) {
+            setActiveGroup(chosen);
+            const savedView = (() => {
+              try { return localStorage.getItem(VIEW_KEY) as ViewState | null; } catch { return null; }
+            })();
+            setCurrentView(savedView || 'dashboard');
+          } else {
+            setCurrentView('groups');
+          }
+        } catch (e) {
+          const savedView = (() => {
+            try { return localStorage.getItem(VIEW_KEY) as ViewState | null; } catch { return null; }
+          })();
+          setCurrentView(savedView || 'groups');
         }
       };
       initGroups();
@@ -146,6 +186,39 @@ const App: React.FC = () => {
       setIsDataLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!activeGroup) return;
+    const capacityForSport = (sport?: string) => {
+      if (!sport) return 14;
+      if (sport === 'Futebol de Campo') return 22;
+      return 14;
+    };
+    const intervalId = setInterval(async () => {
+      try {
+        const loadedMatches = await storage.matches.getAll(activeGroup.id);
+        setMatches(loadedMatches);
+        const cap = capacityForSport(activeGroup.sport);
+        const prev = prevConfirmCountsRef.current;
+        loadedMatches.forEach(m => {
+          const count = (m.confirmedPlayerIds || []).length;
+          const prevCount = prev[m.id] ?? count;
+          if (prevCount >= cap && count < cap) {
+            const field = fields.find(f => f.id === m.fieldId);
+            const label = `${m.date} ${m.time || ''} ${field ? ' - ' + field.name : ''}`.trim();
+            setNotifications(n => [
+              `Vaga aberta no jogo ${label}`,
+              ...n
+            ].slice(0, 5));
+          }
+          prev[m.id] = count;
+        });
+      } catch (e) {
+        // ignore
+      }
+    }, 5000);
+    return () => clearInterval(intervalId);
+  }, [activeGroup, fields]);
 
   const handlePersistPlayer = async (player: Player) => {
     if (!activeGroup) return;
@@ -358,6 +431,7 @@ const App: React.FC = () => {
             activeGroupId={activeGroup!.id}
             currentUser={currentUser!}
             activeGroup={activeGroup!}
+            onRefresh={fetchGroupData}
           />
         );
       case 'financial':
@@ -373,14 +447,34 @@ const App: React.FC = () => {
           <div className="space-y-6 animate-fade-in pb-10">
             {/* Group Banner */}
             <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
-              <div>
-                <p className="text-xs text-gray-400 uppercase font-bold">Grupo Ativo</p>
-                <h3 className="text-xl font-bold text-gray-800">{activeGroup?.name}</h3>
-                <p className="text-xs text-green-600 font-bold">{activeGroup?.sport}</p>
+              <div className="flex items-center gap-3 min-w-0">
+                {activeGroup?.logo ? (
+                  <img 
+                    src={activeGroup.logo}
+                    alt="Logo do Grupo"
+                    className="w-14 h-14 rounded-lg border border-gray-200 object-cover flex-none"
+                  />
+                ) : (
+                  <div className="w-14 h-14 rounded-lg border border-gray-200 bg-gray-50 flex items-center justify-center text-gray-400 flex-none">
+                    ⚽
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <p className="text-xs text-gray-400 uppercase font-bold">Grupo Ativo</p>
+                  <h3 className="text-xl font-bold text-gray-800 truncate">{activeGroup?.name}</h3>
+                  <p className="text-xs text-green-600 font-bold truncate">{activeGroup?.sport}</p>
+                </div>
               </div>
-              <button onClick={() => setCurrentView('groups')} className="text-blue-600 text-sm font-bold bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100">
-                Trocar
-              </button>
+              <div className="flex items-center gap-2">
+                {notifications.length > 0 && (
+                  <button onClick={() => setCurrentView('matches')} className="text-green-700 text-xs font-bold bg-green-50 px-2 py-1 rounded-lg border border-green-200">
+                    {notifications[0]}
+                  </button>
+                )}
+                <button onClick={() => setCurrentView('groups')} className="text-blue-600 text-sm font-bold bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100">
+                  Trocar
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -462,7 +556,7 @@ const App: React.FC = () => {
   // --- Auth & Loading States ---
   if (isAuthLoading) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center">
+      <div className="min-h-screen bg-amber-50 flex items-center justify-center">
         <div className="animate-spin w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full"></div>
       </div>
     );
@@ -473,7 +567,7 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="h-screen bg-gray-50 flex flex-col md:flex-row overflow-hidden">
+    <div className="h-screen bg-amber-50 flex flex-col md:flex-row overflow-hidden">
       {/* Sidebar */}
       <nav className="flex-none bg-white border-b md:border-b-0 md:border-r border-gray-200 flex flex-col z-30 shadow-sm md:shadow-none md:w-64">
         <div className="p-4 md:p-6 border-b border-gray-100 flex items-center justify-between gap-3">
@@ -482,8 +576,31 @@ const App: React.FC = () => {
               ⚽
             </div>
             <h1 className="text-lg md:text-xl font-bold text-gray-900 tracking-tight">Futgol</h1>
+            {activeGroup && (
+              <div className="md:hidden relative ml-1" ref={mobileMainMenuRef}>
+                <button 
+                  onClick={(e) => { e.stopPropagation(); setShowMainMenu(!showMainMenu); }} 
+                  className="p-2 rounded-lg text-gray-600 hover:text-gray-900 focus:outline-none" 
+                  aria-label="Menu"
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                </button>
+                {showMainMenu && (
+                  <div className="absolute top-10 left-0 w-48 bg-white rounded-xl shadow-lg border border-gray-100 py-2 animate-fade-in-up z-50">
+                    <button onClick={(e) => { e.stopPropagation(); setCurrentView('dashboard'); setShowMainMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"><span className="text-lg">🏠</span> Início</button>
+                    <button onClick={(e) => { e.stopPropagation(); setCurrentView('matches'); setShowMainMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"><span className="text-lg">📅</span> Partidas</button>
+                    <button onClick={(e) => { e.stopPropagation(); setCurrentView('players'); setShowMainMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"><span className="text-lg">👥</span> Jogadores</button>
+                    <button onClick={(e) => { e.stopPropagation(); setCurrentView('fields'); setShowMainMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"><span className="text-lg">📍</span> Campos</button>
+                    {isAdmin && (
+                      <button onClick={(e) => { e.stopPropagation(); setCurrentView('financial'); setShowMainMenu(false); }} className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"><span className="text-lg">💰</span> Financeiro</button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-          
+
+
            {/* Mobile Profile Icon with UNIQUE REF */}
            <div className="md:hidden relative" ref={mobileUserMenuRef}>
               <button onClick={() => setShowUserMenu(!showUserMenu)} className="focus:outline-none">
@@ -527,7 +644,7 @@ const App: React.FC = () => {
         
         {/* Navigation */}
         {activeGroup && (
-          <div className="flex md:flex-col overflow-x-auto md:overflow-visible p-2 md:p-4 gap-1.5 md:flex-1 mt-0">
+          <div className="hidden md:flex md:flex-col overflow-x-auto md:overflow-visible p-2 md:p-4 gap-1.5 md:flex-1 mt-0">
             {/* Removed 'Meus Grupos' from here as requested, it is now only in User Menu */}
             
             <NavButton 
@@ -577,12 +694,13 @@ const App: React.FC = () => {
                currentView === 'profile' ? 'Minha Conta' : 
                currentView === 'financial' ? 'Gestão Financeira' : 'Gerenciar Campos'}
             </h2>
-            <p className="text-gray-500 text-sm mt-1">
-              {currentView === 'dashboard' ? `Olá, ${currentUser.name.split(' ')[0]}! Tudo pronto para o jogo?` : 
-               currentView === 'groups' ? 'Gerencie seus times' : 
-               currentView === 'profile' ? 'Atualize seus dados pessoais' : 
-               currentView === 'financial' ? 'Controle o caixa do grupo' : 'Controle total do seu futebol.'}
-            </p>
+          <p className="text-gray-500 text-sm mt-1">
+            {currentView === 'dashboard' ? `Olá, ${currentUser.name.split(' ')[0]}! Tudo pronto para o jogo?` : 
+             currentView === 'groups' ? 'Gerencie seus times' : 
+             currentView === 'profile' ? 'Atualize seus dados pessoais' : 
+             currentView === 'financial' ? 'Controle o caixa do grupo' : 'Controle total do seu futebol.'}
+          </p>
+          
           </div>
           
           <div className="flex items-center gap-4 self-end md:self-auto">
